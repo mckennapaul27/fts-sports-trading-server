@@ -85,7 +85,7 @@ async function fetchSheetData(spreadsheetId, range) {
 function mapToSystemResult(sheetRow, systemId) {
   const dateISO = sheetRow.dateISO || ukToIso(sheetRow.Date);
 
-  return {
+  const mapped = {
     systemId,
     dateISO,
     date: isoToDate(dateISO),
@@ -101,6 +101,9 @@ function mapToSystemResult(sheetRow, systemId) {
     placePL: toNumber(sheetRow["Place P/L"]),
     runningPlacePL: toNumber(sheetRow["Running P/L (Place)"]),
   };
+  //   console.log("mapped", mapped);
+
+  return mapped;
 }
 
 module.exports = {

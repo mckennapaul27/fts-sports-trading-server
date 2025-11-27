@@ -42,12 +42,17 @@ async function syncSystemResults(systemId) {
     const validResults = [];
     const dateISOs = new Set();
 
-    for (const row of sheetData) {
+    console.log("There are", sheetData.length, "rows in the sheet");
+    console.log("mapping rows to SystemResult format");
+
+    for (const [indexOfRow, row] of sheetData.entries()) {
+      console.warn(`Row:`, row);
       try {
         const resultData = mapToSystemResult(row, systemId);
 
         // Skip if required fields are missing
         if (!resultData.dateISO || !resultData.date) {
+          console.log("indexOfRow", indexOfRow);
           console.warn(
             `Skipping row with missing date for system ${system.slug}:`,
             row
@@ -65,6 +70,7 @@ async function syncSystemResults(systemId) {
         );
       }
     }
+    console.log("validResults", validResults.length);
 
     if (!validResults.length) {
       console.log(`No valid data to sync for system ${system.slug}`);

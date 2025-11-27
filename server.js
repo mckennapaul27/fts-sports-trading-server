@@ -11,7 +11,8 @@ const promotionRoutes = require("./routes/promotionRoutes");
 const systemResultRoutes = require("./routes/systemResultRoutes");
 const performanceRoutes = require("./routes/performanceRoutes");
 const System = require("./models/System");
-const { syncAllSystems } = require("./services/syncService");
+const { syncAllSystems, syncSystemResults } = require("./services/syncService");
+const SystemResult = require("./models/SystemResult");
 
 // Load env vars
 dotenv.config();
@@ -51,11 +52,16 @@ const startServer = async () => {
     // Connect to database
     await connectDB();
 
+    await syncSystemResults("6927079fe504d7070a1e2cb3");
+
+    // one time function to deleta all system results
+    // await SystemResult.deleteMany({});
+
     // Set up cron job to sync Google Sheets every 5 minutes
     // Cron expression: "*/5 * * * *" means every 5 minutes
     // Set scheduled: true to prevent overlapping executions
     cron.schedule(
-      "*/5 * * * *",
+      "*/10 * * * *",
       async () => {
         // Skip if sync is already running
         if (isSyncRunning) {
@@ -68,7 +74,7 @@ const startServer = async () => {
 
         console.log("🔄 Running scheduled sync from Google Sheets...");
         try {
-          await syncAllSystems();
+          // await syncAllSystems();
           const duration = ((Date.now() - startTime) / 1000).toFixed(2);
           console.log(`✅ Sync completed in ${duration} seconds`);
         } catch (error) {
@@ -108,33 +114,36 @@ const startServer = async () => {
 
 startServer();
 
-// // One-time function to add initial system
+// // // One-time function to add initial system
 // const initializeSystem = async () => {
 //   try {
-//     const existingSystem = await System.findOne({ slug: "system-1" });
+//     const existingSystem = await System.findOne({ slug: "system-3" });
 //     if (existingSystem) {
-//       console.log("System 'system-1' already exists, skipping initialization");
+//       console.log("System 'system-2' already exists, skipping initialization");
 //       return;
 //     }
 
 //     const system = await System.create({
-//       name: "System 1",
-//       slug: "system-1",
+//       name: "System 3",
+//       slug: "system-3",
 //       isActive: true,
 //       sheets: {
+//         // don't add selections for now
 //         selections: {
 //           spreadsheetId: "1JNnNoLjuCQvu66NU-LulDdNV9NGIcSHI1LAaYoU98nk",
-//           range: "Sheet1!A1:L10", // Placeholder - update with actual selections range
+//           range: "System3", // Placeholder - update with actual selections range
 //         },
 //         results: {
 //           spreadsheetId: "1JNnNoLjuCQvu66NU-LulDdNV9NGIcSHI1LAaYoU98nk",
-//           range: "Sheet1!A1:L10",
+//           range: "System3",
 //         },
 //       },
 //     });
 
-//     console.log("✅ System 'system-1' created successfully:", system);
+//     console.log("✅ System 'system-3' created successfully:", system);
 //   } catch (error) {
 //     console.error("❌ Error initializing system:", error.message);
 //   }
 // };
+
+// initializeSystem();

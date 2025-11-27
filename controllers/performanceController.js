@@ -62,6 +62,8 @@ const getSystemPerformance = async (req, res) => {
     const totalBets = results.length;
     const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
 
+    console.log("totalPL", totalPL);
+
     // Calculate strike rate (wins / total bets)
     const wins = results.filter(
       (r) => r.result && r.result.toUpperCase().includes("LOST")
@@ -77,7 +79,7 @@ const getSystemPerformance = async (req, res) => {
     // Calculate profit by odds range
     const profitByOddsRange = calculateProfitByOddsRange(results);
 
-    res.status(200).json({
+    const toSend = {
       success: true,
       data: {
         systemId,
@@ -90,7 +92,9 @@ const getSystemPerformance = async (req, res) => {
         cumulativePL: monthlyCumulative,
         profitByOddsRange,
       },
-    });
+    };
+
+    res.status(200).json(toSend);
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -189,7 +193,279 @@ function calculateProfitByOddsRange(results) {
   });
 }
 
+// @desc    Get all systems with performance stats
+// @route   GET /api/performance/all-systems
+// @access  Public
+const getAllSystemsWithStats = async (req, res) => {
+  try {
+    // Get all active systems
+    const systems = await System.find({ isActive: true }).sort({ name: 1 });
+
+    // Calculate stats for each system
+    const systemsWithStats = await Promise.all(
+      systems.map(async (system) => {
+        // Get all results for this system
+        const results = await SystemResult.find({ systemId: system._id });
+
+        // Calculate stats
+        const totalBets = results.length;
+        const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
+
+        // Calculate strike rate (for lay bets, "LOST" = win)
+        const wins = results.filter(
+          (r) => r.result && r.result.toUpperCase().includes("LOST")
+        ).length;
+        const strikeRate = totalBets > 0 ? (wins / totalBets) * 100 : 0;
+
+        // Calculate ROI (assuming 1pt level stakes, ROI = totalPL / totalBets * 100)
+        const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
+
+        return {
+          systemId: system._id,
+          systemName: system.name,
+          systemSlug: system.slug,
+          description: system.description,
+          totalPL: Math.round(totalPL * 100) / 100,
+          strikeRate: Math.round(strikeRate * 10) / 10,
+          roi: Math.round(roi * 10) / 10,
+          totalBets,
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      data: systemsWithStats,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Get individual bet records for a system
+// @route   GET /api/performance/results/:systemId
+// @access  Public
+const getSystemResults = async (req, res) => {
+  try {
+    const { systemId } = req.params;
+    const {
+      limit = 20,
+      offset = 0,
+      startDate,
+      endDate,
+      sortBy = "date",
+      sortOrder = "desc",
+    } = req.query;
+
+    // Verify system exists
+    const system = await System.findById(systemId);
+    if (!system) {
+      return res.status(404).json({
+        success: false,
+        error: "System not found",
+      });
+    }
+
+    // Build query
+    const query = { systemId };
+
+    // Date range filtering
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) {
+        query.date.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        // Set to end of day
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.date.$lte = end;
+      }
+    }
+
+    // Parse limit and offset
+    const limitNum = parseInt(limit, 10);
+    const offsetNum = parseInt(offset, 10);
+
+    // Validate sort order
+    const sortOrderNum = sortOrder.toLowerCase() === "asc" ? 1 : -1;
+
+    // Build sort object
+    const sortObj = {};
+    const validSortFields = [
+      "date",
+      "time",
+      "horse",
+      "winBsp",
+      "winPL",
+      "result",
+    ];
+    if (validSortFields.includes(sortBy)) {
+      sortObj[sortBy === "date" ? "date" : sortBy] = sortOrderNum;
+    } else {
+      sortObj.date = sortOrderNum; // Default sort
+    }
+
+    // Get total count
+    const total = await SystemResult.countDocuments(query);
+
+    // Get results with pagination
+    const results = await SystemResult.find(query)
+      .sort(sortObj)
+      .skip(offsetNum)
+      .limit(limitNum);
+
+    // Map to response format
+    const mappedResults = results.map((result) => {
+      const stake = 1.0; // Assuming 1pt level stakes
+      const bsp = result.winBsp || 0;
+      // For lay bets: liability = (bsp - 1) * stake
+      const liability = bsp > 0 ? (bsp - 1) * stake : 0;
+
+      return {
+        date: result.dateISO,
+        country: result.country || null,
+        course: result.meeting || null,
+        time: result.time || null,
+        selection: result.horse || null,
+        result: result.result || null,
+        bsp: bsp,
+        stake: stake,
+        liability: Math.round(liability * 100) / 100,
+        pl: Math.round((result.winPL || 0) * 100) / 100,
+        runningPL: Math.round((result.runningWinPL || 0) * 100) / 100,
+      };
+    });
+
+    // Calculate if there are more results
+    const hasMore = offsetNum + limitNum < total;
+    const nextOffset = hasMore ? offsetNum + limitNum : null;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        results: mappedResults,
+        total,
+        hasMore,
+        nextOffset,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Get monthly breakdown for a system (non-cumulative)
+// @route   GET /api/performance/monthly/:systemId
+// @access  Public
+const getMonthlyBreakdown = async (req, res) => {
+  try {
+    const { systemId } = req.params;
+    const { startDate, endDate } = req.query;
+
+    // Verify system exists
+    const system = await System.findById(systemId);
+    if (!system) {
+      return res.status(404).json({
+        success: false,
+        error: "System not found",
+      });
+    }
+
+    // Build query
+    const query = { systemId };
+
+    // Date range filtering
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) {
+        query.date.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.date.$lte = end;
+      }
+    }
+
+    // Get all results for this system
+    const results = await SystemResult.find(query).sort({ date: 1 });
+
+    // Group by month and calculate monthly P/L (non-cumulative)
+    const monthlyData = {};
+
+    results.forEach((result) => {
+      if (!result.date) return;
+
+      const date = new Date(result.date);
+      const yearMonth = `${date.getFullYear()}-${String(
+        date.getMonth() + 1
+      ).padStart(2, "0")}`;
+
+      if (!monthlyData[yearMonth]) {
+        monthlyData[yearMonth] = {
+          month: yearMonth,
+          monthName: date.toLocaleString("default", {
+            month: "long",
+            year: "numeric",
+          }),
+          monthlyPL: 0,
+          bets: 0,
+          wins: 0,
+        };
+      }
+
+      monthlyData[yearMonth].monthlyPL += result.winPL || 0;
+      monthlyData[yearMonth].bets += 1;
+
+      // Count wins (for lay bets, "LOST" = win)
+      if (result.result && result.result.toUpperCase().includes("LOST")) {
+        monthlyData[yearMonth].wins += 1;
+      }
+    });
+
+    // Convert to array and calculate strike rate
+    const monthlyArray = Object.values(monthlyData)
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .map((month) => ({
+        month: month.month,
+        monthName: month.monthName,
+        monthlyPL: Math.round(month.monthlyPL * 100) / 100,
+        bets: month.bets,
+        wins: month.wins,
+        strikeRate:
+          month.bets > 0
+            ? Math.round((month.wins / month.bets) * 100 * 10) / 10
+            : 0,
+      }));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        systemId,
+        systemName: system.name,
+        systemSlug: system.slug,
+        monthlyBreakdown: monthlyArray,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getSystems,
   getSystemPerformance,
+  getAllSystemsWithStats,
+  getSystemResults,
+  getMonthlyBreakdown,
 };
