@@ -52,7 +52,7 @@ const startServer = async () => {
     // Connect to database
     await connectDB();
 
-    await syncSystemResults("6927079fe504d7070a1e2cb3");
+    // await syncSystemResults("6927079fe504d7070a1e2cb3");
 
     // one time function to deleta all system results
     // await SystemResult.deleteMany({});

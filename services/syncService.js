@@ -60,6 +60,11 @@ async function syncSystemResults(systemId) {
           continue;
         }
 
+        // Add rowOrder to preserve Google Sheets order
+        // Use indexOfRow to maintain the original Google Sheets row position
+        // (sheetData excludes header, so indexOfRow 0 = first data row in Google Sheets)
+        resultData.rowOrder = indexOfRow;
+
         validResults.push(resultData);
         dateISOs.add(resultData.dateISO);
       } catch (error) {
@@ -70,7 +75,10 @@ async function syncSystemResults(systemId) {
         );
       }
     }
-    console.log("validResults", validResults.length);
+    // console.log("validResults", validResults);
+    validResults.forEach((result) => {
+      console.warn(result);
+    });
 
     if (!validResults.length) {
       console.log(`No valid data to sync for system ${system.slug}`);

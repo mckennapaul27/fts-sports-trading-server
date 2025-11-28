@@ -27,11 +27,16 @@ const systemResultSchema = new Schema(
     placeBsp: Number,
     placePL: Number,
     runningPlacePL: Number,
+
+    // Row order from Google Sheets to maintain original order
+    rowOrder: { type: Number, index: true },
   },
   { timestamps: true }
 );
 
 // Composite index for fast queries
 systemResultSchema.index({ systemId: 1, dateISO: 1 });
+// Index for maintaining Google Sheets order
+systemResultSchema.index({ systemId: 1, rowOrder: 1 });
 
 module.exports = model("SystemResult", systemResultSchema);

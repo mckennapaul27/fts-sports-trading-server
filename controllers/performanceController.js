@@ -28,6 +28,8 @@ const getSystems = async (req, res) => {
 const getSystemPerformance = async (req, res) => {
   try {
     const { systemId } = req.params;
+    const query = req.query;
+    console.log("query in getSystemPerformance", query);
 
     // Verify system exists
     const system = await System.findById(systemId);
@@ -38,8 +40,26 @@ const getSystemPerformance = async (req, res) => {
       });
     }
 
+    // Build query
+    const dbQuery = { systemId };
+
+    // Date range filtering
+    const { startDate, endDate } = query;
+    if (startDate || endDate) {
+      dbQuery.date = {};
+      if (startDate) {
+        dbQuery.date.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        // Set to end of day
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        dbQuery.date.$lte = end;
+      }
+    }
+
     // Get all results for this system
-    const results = await SystemResult.find({ systemId }).sort({ date: 1 });
+    const results = await SystemResult.find(dbQuery).sort({ date: 1 });
 
     if (!results.length) {
       return res.status(200).json({
@@ -159,20 +179,18 @@ function calculateMonthlyCumulative(results) {
  */
 function calculateProfitByOddsRange(results) {
   const ranges = [
-    { label: "1.0 - 2.0", min: 1.0, max: 2.0 },
-    { label: "2.0 - 3.0", min: 2.0, max: 3.0 },
-    { label: "3.0 - 4.0", min: 3.0, max: 4.0 },
-    { label: "4.0 - 5.0", min: 4.0, max: 5.0 },
-    { label: "5.0 - 6.0", min: 5.0, max: 6.0 },
-    { label: "6.0 - 8.0", min: 6.0, max: 8.0 },
-    { label: "8.0 - 10.0", min: 8.0, max: 10.0 },
-    { label: "10.0+", min: 10.0, max: Infinity },
+    { label: "Odds < 10.0", max: 10.0 },
+    { label: "Odds < 20.0", max: 20.0 },
+    { label: "Odds < 30.0", max: 30.0 },
+    { label: "All Odds", max: Infinity },
   ];
+
+  // console.log("ranges", ranges);
 
   return ranges.map((range) => {
     const rangeResults = results.filter((r) => {
       if (!r.winBsp) return false;
-      return r.winBsp >= range.min && r.winBsp < range.max;
+      return r.winBsp <= range.max;
     });
 
     const profit = rangeResults.reduce((sum, r) => sum + (r.winPL || 0), 0);
@@ -181,15 +199,22 @@ function calculateProfitByOddsRange(results) {
       (r) => r.result && r.result.toUpperCase().includes("LOST")
     ).length;
 
-    return {
+    // Calculate average odds (sum of odds / count of bets)
+    const sumOdds = rangeResults.reduce((sum, r) => sum + (r.winBsp || 0), 0);
+    const avgOdds = bets > 0 ? sumOdds / bets : 0;
+
+    const toSend = {
       range: range.label,
-      minOdds: range.min,
+      minOdds: 1.0, // All ranges start from 1.0 (minimum betting odds)
       maxOdds: range.max === Infinity ? null : range.max,
       profit: Math.round(profit * 100) / 100,
       bets,
       wins,
       strikeRate: bets > 0 ? Math.round((wins / bets) * 100 * 10) / 10 : 0,
+      avgOdds: Math.round(avgOdds * 100) / 100, // Round to 2 decimal places
     };
+
+    return toSend;
   });
 }
 
@@ -251,14 +276,7 @@ const getAllSystemsWithStats = async (req, res) => {
 const getSystemResults = async (req, res) => {
   try {
     const { systemId } = req.params;
-    const {
-      limit = 20,
-      offset = 0,
-      startDate,
-      endDate,
-      sortBy = "date",
-      sortOrder = "desc",
-    } = req.query;
+    const { limit = 20, offset = 0, startDate, endDate } = req.query;
 
     // Verify system exists
     const system = await System.findById(systemId);
@@ -290,25 +308,14 @@ const getSystemResults = async (req, res) => {
     const limitNum = parseInt(limit, 10);
     const offsetNum = parseInt(offset, 10);
 
-    // Validate sort order
-    const sortOrderNum = sortOrder.toLowerCase() === "asc" ? 1 : -1;
+    // Always sort by rowOrder ascending to maintain Google Sheets order
+    // Fallback to date/time for older records without rowOrder
+    const sortObj = {
+      rowOrder: -1, // Ascending to match Google Sheets (top to bottom)
+    };
 
-    // Build sort object
-    const sortObj = {};
-    const validSortFields = [
-      "date",
-      "time",
-      "horse",
-      "winBsp",
-      "winPL",
-      "result",
-    ];
-    if (validSortFields.includes(sortBy)) {
-      sortObj[sortBy === "date" ? "date" : sortBy] = sortOrderNum;
-    } else {
-      sortObj.date = sortOrderNum; // Default sort
-    }
-
+    // console.log("query", query);
+    // console.log("sortObj", sortObj);
     // Get total count
     const total = await SystemResult.countDocuments(query);
 
