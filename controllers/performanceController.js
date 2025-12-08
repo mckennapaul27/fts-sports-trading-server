@@ -29,7 +29,7 @@ const getSystemPerformance = async (req, res) => {
   try {
     const { systemId } = req.params;
     const query = req.query;
-    console.log("query in getSystemPerformance", query);
+    // console.log("query in getSystemPerformance", query);
 
     // Verify system exists
     const system = await System.findById(systemId);
@@ -236,6 +236,9 @@ const getAllSystemsWithStats = async (req, res) => {
         const totalBets = results.length;
         const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
 
+        console.log("totalBets", totalBets);
+        console.log("totalPL", totalPL);
+
         // Calculate strike rate (for lay bets, "LOST" = win)
         const wins = results.filter(
           (r) => r.result && r.result.toUpperCase().includes("LOST")
@@ -244,15 +247,16 @@ const getAllSystemsWithStats = async (req, res) => {
 
         // Calculate ROI (assuming 1pt level stakes, ROI = totalPL / totalBets * 100)
         const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
+        console.log("roi", roi);
 
         return {
           systemId: system._id,
           systemName: system.name,
           systemSlug: system.slug,
           description: system.description,
-          totalPL: Math.round(totalPL * 100) / 100,
-          strikeRate: Math.round(strikeRate * 10) / 10,
-          roi: Math.round(roi * 10) / 10,
+          totalPL: totalPL.toFixed(2),
+          strikeRate,
+          roi,
           totalBets,
         };
       })
