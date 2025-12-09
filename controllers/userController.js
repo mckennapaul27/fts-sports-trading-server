@@ -1,4 +1,10 @@
 const User = require("../models/User");
+const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+
+const generateToken = (userId) => {
+  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "365d" });
+};
 
 // @desc    Get all users
 // @route   GET /api/users
@@ -50,7 +56,23 @@ const getUser = async (req, res) => {
 // @access  Public
 const createUser = async (req, res) => {
   try {
-    const user = await User.create(req.body);
+    const existingUser = await User.findOne({
+      email: req.body.email.toLowerCase().trim(),
+    });
+    if (existingUser) {
+      return res.status(409).json({
+        message: "Email already registered",
+      });
+    }
+
+    const user = new User({
+      email: req.body.email.toLowerCase().trim(),
+      password: req.body.password,
+      firstName: req.body.firstName,
+      lastName: req.body.lastName,
+      role: "user",
+    });
+    await user.save();
 
     res.status(201).json({
       success: true,
@@ -71,19 +93,48 @@ const createUser = async (req, res) => {
   }
 };
 
+// @desc    Login user
+// @route   POST /api/users/login
+// @access  Public
+const loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+    if (!user || !(await user.comparePassword(password))) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({ message: "Account is blocked" });
+    }
+    const token = generateToken(user._id);
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.log("error in exports.login ", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // @desc    Update user
 // @route   PUT /api/users/:id
 // @access  Public
 const updateUser = async (req, res) => {
   try {
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+    const user = await User.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
 
     if (!user) {
       return res.status(404).json({
@@ -143,5 +194,5 @@ module.exports = {
   createUser,
   updateUser,
   deleteUser,
+  loginUser,
 };
-
