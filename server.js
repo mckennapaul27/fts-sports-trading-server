@@ -1,5 +1,8 @@
-const express = require("express");
+// Load env vars FIRST before any other requires
 const dotenv = require("dotenv");
+dotenv.config();
+
+const express = require("express");
 const cors = require("cors");
 const cron = require("node-cron");
 const connectDB = require("./config/database");
@@ -10,14 +13,22 @@ const subscriptionRoutes = require("./routes/subscriptionRoutes");
 const promotionRoutes = require("./routes/promotionRoutes");
 const systemResultRoutes = require("./routes/systemResultRoutes");
 const performanceRoutes = require("./routes/performanceRoutes");
+
+const stripeWebhookController = require("./controllers/stripeWebhookController");
+
 const System = require("./models/System");
 const { syncAllSystems, syncSystemResults } = require("./services/syncService");
 const SystemResult = require("./models/SystemResult");
 
-// Load env vars
-dotenv.config();
-
 const app = express();
+
+// Stripe Webhook - MUST be before express.json() middleware
+// Stripe needs the raw body buffer for signature verification
+app.post(
+  "/stripe-webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookController.handleStripeWebhook
+);
 
 // Middleware
 app.use(cors());
@@ -74,7 +85,7 @@ const startServer = async () => {
 
         console.log("🔄 Running scheduled sync from Google Sheets...");
         try {
-          await syncAllSystems();
+          // await syncAllSystems();
           const duration = ((Date.now() - startTime) / 1000).toFixed(2);
           console.log(`✅ Sync completed in ${duration} seconds`);
         } catch (error) {

@@ -1,6 +1,10 @@
 const User = require("../models/User");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
+const StripeCustomer = require("../models/StripeCustomer");
+
+// Initialize Stripe
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "365d" });
@@ -188,6 +192,101 @@ const deleteUser = async (req, res) => {
   }
 };
 
+// @desc Register and Subscribe
+// @route   POST /api/users/register-and-subscribe
+// @access  Public
+const registerAndSubscribe = async (req, res) => {
+  const { email, password, firstName, lastName, productId, systemSlugs } =
+    req.body;
+  console.log("req.body", req.body);
+
+  if (!productId) {
+    return res.status(400).json({ message: "Product ID is required." });
+  }
+
+  try {
+    // 1. Check if user already exists
+    const existingUser = await User.findOne({
+      email: email.toLowerCase().trim(),
+    });
+
+    if (existingUser) {
+      return res.status(409).json({ message: "Email already registered." });
+    }
+
+    // 2. Create a new Stripe Customer
+    const stripeCustomer = await stripe.customers.create({
+      email: email.toLowerCase().trim(),
+      name: `${firstName} ${lastName}`,
+    });
+
+    // 3. Create a new User in your database
+    const user = new User({
+      email: email.toLowerCase().trim(),
+      password, // Password will be hashed by the 'pre-save' middleware
+      firstName,
+      lastName,
+      role: "user",
+    });
+    console.log("user", user);
+    await user.save();
+
+    // 4. Link the Stripe customer to the user in your database
+    const customerMapping = new StripeCustomer({
+      userId: user._id,
+      stripeCustomerId: stripeCustomer.id,
+    });
+    console.log("customerMapping", customerMapping);
+    await customerMapping.save();
+
+    // 5. Find the active price for the given product ID
+    const prices = await stripe.prices.list({
+      product: productId,
+      active: true,
+      limit: 1,
+    });
+    console.log("prices", prices);
+
+    if (prices.data.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "No active price found for the given product." });
+    }
+    const priceId = prices.data[0].id;
+
+    // 6. Create a Stripe Checkout Session for the subscription
+    const session = await stripe.checkout.sessions.create({
+      customer: stripeCustomer.id,
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: "subscription",
+      success_url: `${process.env.FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/payment/cancelled`,
+      // Pass the userId in metadata to use it in webhooks
+      subscription_data: {
+        metadata: {
+          userId: user._id.toString(),
+          productId: productId,
+          systemSlugs: JSON.stringify(systemSlugs),
+        },
+      },
+    });
+    console.log("session", session);
+
+    // 7. Return the session URL to the frontend
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error("Error in registerAndSubscribe:", error);
+    res
+      .status(500)
+      .json({ message: "An error occurred during the signup process." });
+  }
+};
 module.exports = {
   getUsers,
   getUser,
@@ -195,4 +294,5 @@ module.exports = {
   updateUser,
   deleteUser,
   loginUser,
+  registerAndSubscribe,
 };

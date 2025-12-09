@@ -29,9 +29,6 @@ const userSchema = new Schema(
       enum: ["user", "admin"],
       default: "user",
     },
-
-    stripeCustomerId: { type: String, index: true },
-
     activeSystemIds: [{ type: Schema.Types.ObjectId, ref: "System" }],
   },
   { timestamps: true }

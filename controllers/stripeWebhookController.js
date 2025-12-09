@@ -1,0 +1,239 @@
+const StripeSubscription = require("../models/StripeSubscription");
+const WebHookEvent = require("../models/WebHookEvent");
+const User = require("../models/User");
+const System = require("../models/System");
+const { Resend } = require("resend");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+const handleCheckoutSessionCompleted = async (session) => {
+  const subscriptionId = session.subscription;
+
+  if (!subscriptionId) {
+    console.log(
+      "⚠️  No subscription ID in session - this might be a one-time payment"
+    );
+    return;
+  }
+
+  console.log(`🔍 Retrieving subscription: ${subscriptionId}`);
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+
+  console.log("📋 Subscription retrieved:");
+  console.log("  - ID:", subscription.id);
+  console.log("  - Status:", subscription.status);
+  console.log("  - Metadata:", subscription.metadata);
+
+  // Get dates from subscription items (they're nested, not at root level)
+  const subscriptionItem = subscription.items.data[0];
+  const currentPeriodStart = subscriptionItem?.current_period_start;
+  const currentPeriodEnd = subscriptionItem?.current_period_end;
+
+  console.log("  - Dates from items.data[0]:");
+  console.log("    - current_period_start:", currentPeriodStart);
+  console.log("    - current_period_end:", currentPeriodEnd);
+
+  const { userId, productId, systemSlugs } = subscription.metadata;
+
+  if (!userId || !productId || !systemSlugs) {
+    console.error(
+      "CRITICAL: User ID or Product ID or System Slugs not found in subscription metadata.",
+      subscription
+    );
+    throw new Error(
+      "User ID or Product ID or System Slugs not found in subscription metadata."
+    );
+  }
+
+  const existingSubscription = await StripeSubscription.findOne({
+    stripeSubscriptionId: subscription.id,
+  });
+  if (existingSubscription) {
+    console.log(
+      `Subscription ${subscription.id} already processed. Skipping creation.`
+    );
+    return;
+  }
+
+  // Only set dates if they exist, otherwise let them be undefined (model allows it)
+  const subscriptionData = {
+    userId: userId,
+    stripeSubscriptionId: subscription.id,
+    plan: subscriptionItem?.plan.id,
+    productId: productId,
+    status: subscription.status,
+    metadata: {
+      userId: userId,
+      productId: productId,
+      systemSlugs: systemSlugs,
+    },
+  };
+
+  // Only add dates if they exist
+  if (currentPeriodStart) {
+    subscriptionData.currentPeriodStart = new Date(currentPeriodStart * 1000);
+  }
+  if (currentPeriodEnd) {
+    subscriptionData.currentPeriodEnd = new Date(currentPeriodEnd * 1000);
+  }
+
+  await StripeSubscription.create(subscriptionData);
+
+  console.log(`Subscription created for user: ${userId}`);
+
+  // Update user's active system IDs
+  const user = await User.findById(userId);
+  if (!user) {
+    console.error(`User not found: ${userId}`);
+    return;
+  }
+  // Parse systemSlugs from JSON string back to array, then look up System ObjectIds
+  try {
+    const parsedSystemSlugs = JSON.parse(systemSlugs);
+    // Look up Systems by slug and get their ObjectIds
+    const systems = await System.find({ slug: { $in: parsedSystemSlugs } });
+    user.activeSystemIds = systems.map((system) => system._id);
+    await user.save();
+    console.log("User updated with activeSystemIds:", user.activeSystemIds);
+  } catch (parseError) {
+    console.error("Error parsing systemSlugs:", parseError);
+    console.error("systemSlugs value:", systemSlugs);
+  }
+};
+
+const handleSubscriptionUpdated = async (subscription) => {
+  await StripeSubscription.findOneAndUpdate(
+    { stripeSubscriptionId: subscription.id },
+    {
+      status: subscription.status,
+      plan: subscription.items.data[0]?.plan.id,
+      productId: subscription.items.data[0]?.plan.product,
+      currentPeriodStart: new Date(subscription.current_period_start * 1000),
+      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+    },
+    { new: true }
+  );
+  console.log(`Subscription updated: ${subscription.id}`);
+};
+
+const handleSubscriptionDeleted = async (subscription) => {
+  await StripeSubscription.findOneAndUpdate(
+    { stripeSubscriptionId: subscription.id },
+    { status: "canceled" }
+  );
+  console.log(`Subscription canceled: ${subscription.id}`);
+};
+
+const handleInvoicePaymentFailed = async (invoice) => {
+  try {
+    // 1. Find the subscription in our database using the ID from the invoice
+    const subscription = await StripeSubscription.findOne({
+      stripeSubscriptionId: invoice.subscription,
+    });
+
+    if (!subscription) {
+      console.error(
+        `Webhook Error: Received invoice.payment_failed for a subscription not found in DB: ${invoice.subscription}`
+      );
+      return;
+    }
+
+    // 2. Find the user associated with this subscription
+    const user = await User.findById(subscription.userId);
+
+    if (!user) {
+      console.error(
+        `Webhook Error: User not found for subscription ID: ${invoice.subscription}`
+      );
+      return;
+    }
+
+    // 3. Send the email notification using Resend
+    await resend.emails.send({
+      from: "Bunker Digital <mail@bunkerdigital.co.uk>",
+      to: user.email,
+      subject: "Action Required: Your Subscription Payment Failed",
+      html: `
+        <h1>Payment Issue with Your Bunker Digital Subscription</h1>
+        <p>Hi ${user.firstName || "there"},</p>
+        <p>We're writing to let you know that the latest payment for your subscription failed. This can happen for a number of reasons, such as an expired card or insufficient funds.</p>
+        <p>To ensure your service continues without interruption, please update your payment details as soon as possible.</p>
+        <p>You can do this by logging into your account and visiting the billing management page:</p>
+        <p><a href="https://www.bunkerdigital.co.uk/login"><strong>Log in to Update Payment Method</strong></a></p>
+        <p>Once you've updated your details, Stripe will automatically retry the payment.</p>
+        <p>If you have any questions, please don't hesitate to contact us.</p>
+        <p>Thanks,<br>Paul</p>
+        <p>Bunker Digital</p>
+      `,
+    });
+
+    console.log(`Payment failed email sent to: ${user.email}`);
+  } catch (error) {
+    console.error("Error in handleInvoicePaymentFailed:", error);
+  }
+};
+
+exports.handleStripeWebhook = async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error(`⚠️  Webhook signature verification failed.`, err.message);
+    console.error(
+      `Webhook secret used: ${
+        process.env.STRIPE_WEBHOOK_SECRET ? "SET" : "NOT SET"
+      }`
+    );
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Prevent processing duplicate events
+  const existingEvent = await WebHookEvent.findOne({ stripeEventId: event.id });
+  if (existingEvent) {
+    console.log(`Webhook event ${event.id} already processed.`);
+    return res.json({ received: true });
+  }
+
+  // Save the event to the database
+  await WebHookEvent.create({
+    stripeEventId: event.id,
+    type: event.type,
+    payload: event.data.object,
+  });
+
+  // Handle the event
+  try {
+    switch (event.type) {
+      case "checkout.session.completed":
+        await handleCheckoutSessionCompleted(event.data.object);
+        break;
+      case "customer.subscription.updated":
+        await handleSubscriptionUpdated(event.data.object);
+        break;
+      case "customer.subscription.deleted":
+        await handleSubscriptionDeleted(event.data.object);
+        break;
+      case "invoice.payment_failed":
+        // Only handle for subscriptions
+        if (event.data.object.subscription) {
+          await handleInvoicePaymentFailed(event.data.object);
+        }
+        break;
+      default:
+        console.log(`Unhandled event type ${event.type}`);
+    }
+  } catch (error) {
+    console.error(`Error handling webhook event ${event.id}:`, error);
+    // Optionally, you could update the WebHookEvent record to mark it as failed
+    return res.status(500).json({ error: "Webhook handler failed." });
+  }
+
+  res.json({ received: true });
+};
