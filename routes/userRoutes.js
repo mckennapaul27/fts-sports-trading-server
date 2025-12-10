@@ -8,10 +8,26 @@ const {
   deleteUser,
   loginUser,
   registerAndSubscribe,
+  getBillingDetails,
 } = require("../controllers/userController");
+const { auth } = require("../middleware/auth");
 
-router.route("/").get(getUsers).post(createUser);
-router.route("/:id").get(getUser).put(updateUser).delete(deleteUser);
-router.route("/login").post(loginUser);
-router.route("/register-and-subscribe").post(registerAndSubscribe);
+// /api/users/billing
+router.get("/billing", auth, getBillingDetails);
+
+// /api/users/get
+router.get("/", getUsers);
+// /api/users/create
+router.post("/", createUser);
+// /api/users/get/:id
+router.get("/:id", getUser);
+// /api/users/update/:id
+router.put("/:id", updateUser);
+// /api/users/delete/:id
+router.delete("/:id", deleteUser);
+// /api/users/login
+router.post("/login", loginUser);
+// /api/users/register-and-subscribe
+router.post("/register-and-subscribe", registerAndSubscribe);
+
 module.exports = router;

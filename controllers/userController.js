@@ -2,6 +2,8 @@ const User = require("../models/User");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const StripeCustomer = require("../models/StripeCustomer");
+const StripeSubscription = require("../models/StripeSubscription");
+const System = require("../models/System");
 
 // Initialize Stripe
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
@@ -287,6 +289,169 @@ const registerAndSubscribe = async (req, res) => {
       .json({ message: "An error occurred during the signup process." });
   }
 };
+
+// @desc    Get billing details
+// @route   GET /api/users/billing
+// @access  Private
+const getBillingDetails = async (req, res) => {
+  try {
+    const userId = req.user.id; // From your auth middleware
+
+    // 1. Get user's subscription from DB
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      status: { $in: ["active", "trialing", "past_due"] }, // Active subscriptions
+    }).sort({ createdAt: -1 }); // Get most recent
+
+    if (!subscription) {
+      return res.json({
+        hasSubscription: false,
+        currentPlan: null,
+        paymentMethod: null,
+        billingHistory: [],
+      });
+    }
+
+    // 2. Get Stripe customer
+    const stripeCustomer = await StripeCustomer.findOne({ userId });
+
+    // Get subscription details from Stripe
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      subscription.stripeSubscriptionId
+    );
+
+    // Update database subscription with latest period dates from Stripe if available
+    if (
+      stripeSubscription.current_period_start ||
+      stripeSubscription.current_period_end
+    ) {
+      const updateData = {};
+      if (stripeSubscription.current_period_start) {
+        updateData.currentPeriodStart = new Date(
+          stripeSubscription.current_period_start * 1000
+        );
+      }
+      if (stripeSubscription.current_period_end) {
+        updateData.currentPeriodEnd = new Date(
+          stripeSubscription.current_period_end * 1000
+        );
+      }
+      await StripeSubscription.findByIdAndUpdate(subscription._id, updateData);
+    }
+
+    // Get price and product details
+    const price = await stripe.prices.retrieve(
+      stripeSubscription.items.data[0].price.id
+    );
+    const product = await stripe.products.retrieve(price.product);
+
+    // Get next billing date - use Stripe API value (most accurate), fallback to database value
+    let nextBillingDate = null;
+    if (stripeSubscription.current_period_end) {
+      // Stripe returns Unix timestamp in seconds, convert to milliseconds for Date
+      nextBillingDate = new Date(stripeSubscription.current_period_end * 1000);
+    } else {
+      // Fallback to database value if Stripe doesn't have it (shouldn't happen for active subscriptions)
+      const updatedSubscription = await StripeSubscription.findById(
+        subscription._id
+      );
+      if (updatedSubscription?.currentPeriodEnd) {
+        nextBillingDate = updatedSubscription.currentPeriodEnd;
+      }
+    }
+
+    // Get payment method
+    let paymentMethod = null;
+    if (stripeCustomer?.defaultPaymentMethodId) {
+      const pm = await stripe.paymentMethods.retrieve(
+        stripeCustomer.defaultPaymentMethodId
+      );
+      paymentMethod = {
+        type: pm.card?.brand || "card",
+        last4: pm.card?.last4 || "",
+        expMonth: pm.card?.exp_month || "",
+        expYear: pm.card?.exp_year || "",
+      };
+    } else if (stripeSubscription.default_payment_method) {
+      const pm = await stripe.paymentMethods.retrieve(
+        stripeSubscription.default_payment_method
+      );
+      paymentMethod = {
+        type: pm.card?.brand || "card",
+        last4: pm.card?.last4 || "",
+        expMonth: pm.card?.exp_month || "",
+        expYear: pm.card?.exp_year || "",
+      };
+    }
+
+    // Get invoice history
+    const invoices = await stripe.invoices.list({
+      customer: stripeCustomer.stripeCustomerId,
+      limit: 12, // Last 12 invoices
+      status: "paid",
+    });
+
+    // Get systems for plan description
+    const systems = await System.find({ isActive: true });
+
+    // Format response
+    const response = {
+      hasSubscription: true,
+      currentPlan: {
+        name: product.name || subscription.plan,
+        status: subscription.status,
+        description: getPlanDescription(subscription, systems),
+        price: (price.unit_amount / 100).toFixed(2),
+        currency: price.currency.toUpperCase(),
+        period: price.recurring?.interval || "month",
+        nextBillingDate: nextBillingDate,
+        productId: subscription.productId,
+        priceId: price.id,
+      },
+      paymentMethod: paymentMethod
+        ? {
+            brand: paymentMethod.type,
+            last4: paymentMethod.last4,
+            expMonth: paymentMethod.expMonth,
+            expYear: paymentMethod.expYear,
+          }
+        : null,
+      memberSince: subscription.createdAt || new Date(),
+      billingHistory: invoices.data.map((invoice) => ({
+        id: invoice.id,
+        date: new Date(invoice.created * 1000),
+        description: invoice.lines.data[0]?.description || product.name,
+        amount: (invoice.amount_paid / 100).toFixed(2),
+        currency: invoice.currency.toUpperCase(),
+        status: invoice.status,
+        invoiceUrl: invoice.invoice_pdf || invoice.hosted_invoice_url,
+      })),
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error("Error fetching billing data:", error);
+    res.status(500).json({ message: "Failed to fetch billing data" });
+  }
+};
+
+// Helper function
+function getPlanDescription(subscription, systems) {
+  // Check metadata for system slugs
+  const systemSlugs = subscription.metadata?.systemSlugs
+    ? JSON.parse(subscription.metadata.systemSlugs)
+    : [];
+
+  if (systemSlugs.length === systems.length) {
+    return `Access to all ${systems.length} trading systems`;
+  } else if (systemSlugs.length === 1) {
+    const system = systems.find((s) => s.slug === systemSlugs[0]);
+    return `Access to ${system?.name || "1 system"}`;
+  } else {
+    return `Access to ${systemSlugs.length} systems`;
+  }
+}
+
 module.exports = {
   getUsers,
   getUser,
@@ -295,4 +460,5 @@ module.exports = {
   deleteUser,
   loginUser,
   registerAndSubscribe,
+  getBillingDetails,
 };

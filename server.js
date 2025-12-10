@@ -22,6 +22,44 @@ const SystemResult = require("./models/SystemResult");
 
 const app = express();
 
+// Define your whitelist for CORS
+const whiteList = [
+  /bunkerdigital\.co.uk$/,
+  /bunkerdigital\.com$/,
+  /bunkerdigital\.com$/,
+  /bunker-digital-fe-new-tw.vercel\.app$/,
+];
+
+if (process.env.NODE_ENV !== "production") {
+  whiteList.push("http://localhost:3000");
+  whiteList.push("http://localhost:3001");
+  whiteList.push("http://localhost:3002");
+  whiteList.push("http://localhost:5000");
+}
+
+// Middleware
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      const isAllowed = whiteList.some((allowed) => {
+        if (typeof allowed === "string") return origin === allowed;
+        if (allowed instanceof RegExp) return allowed.test(origin);
+        return false;
+      });
+      if (!isAllowed) {
+        console.log("CORS blocked origin:", origin);
+        console.log("Whitelist:", whiteList);
+      }
+      callback(null, isAllowed);
+    },
+    optionsSuccessStatus: 200,
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "PUT", "POST", "DELETE", "OPTIONS"],
+  })
+);
+
 // Stripe Webhook - MUST be before express.json() middleware
 // Stripe needs the raw body buffer for signature verification
 app.post(
@@ -30,11 +68,9 @@ app.post(
   stripeWebhookController.handleStripeWebhook
 );
 
-// Middleware
-app.use(cors());
+// Body parser middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-
 // Routes
 app.use("/api/users", userRoutes);
 app.use("/api/systems", systemRoutes);
