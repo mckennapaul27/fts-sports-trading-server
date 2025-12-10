@@ -28,6 +28,7 @@ const whiteList = [
   /bunkerdigital\.com$/,
   /bunkerdigital\.com$/,
   /bunker-digital-fe-new-tw.vercel\.app$/,
+  /fts-sports-trading-fe.vercel\.app$/,
 ];
 
 if (process.env.NODE_ENV !== "production") {
@@ -98,6 +99,9 @@ const startServer = async () => {
   try {
     // Connect to database
     await connectDB();
+
+    // sync all systems
+    // await syncAllSystems();
 
     // await syncSystemResults("6927079fe504d7070a1e2cb3");
 
