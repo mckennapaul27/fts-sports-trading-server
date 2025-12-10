@@ -40,10 +40,37 @@ heroku config:set MONGODB_URI="your-mongodb-connection-string"
 heroku config:set RUN_INITIAL_SYNC="false"
 ```
 
-**Note:** For the Google Sheets service account key, you have two options:
+**Note:** For the Google Sheets service account credentials, set each field as a separate environment variable:
 
-- Option A: Store the JSON content as an environment variable and modify the code to read from env var instead of file
-- Option B: Use Heroku's config vars to store the key file content
+```bash
+# Set Google Service Account credentials (replace with your actual values)
+heroku config:set GOOGLE_SERVICE_ACCOUNT_TYPE="service_account"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_PROJECT_ID="your-project-id"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY_ID="your-private-key-id"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_CLIENT_EMAIL="your-service-account@project.iam.gserviceaccount.com"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_CLIENT_ID="your-client-id"
+
+# For the private key, use single quotes to preserve newlines, or escape them
+# Option 1: Use single quotes (recommended)
+heroku config:set GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----\nYOUR_KEY_CONTENT\n-----END PRIVATE KEY-----'
+
+# Option 2: Use double quotes with escaped newlines
+heroku config:set GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\nYOUR_KEY_CONTENT\\n-----END PRIVATE KEY-----"
+
+# Optional: Set other Google auth URIs (defaults are provided)
+heroku config:set GOOGLE_SERVICE_ACCOUNT_AUTH_URI="https://accounts.google.com/o/oauth2/auth"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_TOKEN_URI="https://oauth2.googleapis.com/token"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_AUTH_PROVIDER_X509_CERT_URL="https://www.googleapis.com/oauth2/v1/certs"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_CLIENT_X509_CERT_URL="https://www.googleapis.com/robot/v1/metadata/x509/YOUR_SERVICE_ACCOUNT"
+heroku config:set GOOGLE_SERVICE_ACCOUNT_UNIVERSE_DOMAIN="googleapis.com"
+```
+
+**Important:** When setting the private key:
+
+- The private key should include the `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----` markers
+- Use `\n` to represent newlines in the key
+- Do NOT wrap the entire value in quotes when using the Heroku CLI (the CLI handles quotes automatically)
+- If copying from a JSON file, ensure all `\n` sequences are preserved
 
 ### 5. Deploy to Heroku
 

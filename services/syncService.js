@@ -45,18 +45,23 @@ async function syncSystemResults(systemId) {
     console.log("There are", sheetData.length, "rows in the sheet");
     console.log("mapping rows to SystemResult format");
 
+    // Track skipped rows and errors (limit logging to avoid memory issues)
+    let skippedCount = 0;
+    let errorCount = 0;
+
     for (const [indexOfRow, row] of sheetData.entries()) {
-      console.warn(`Row:`, row);
       try {
         const resultData = mapToSystemResult(row, systemId);
 
         // Skip if required fields are missing
         if (!resultData.dateISO || !resultData.date) {
-          console.log("indexOfRow", indexOfRow);
-          console.warn(
-            `Skipping row with missing date for system ${system.slug}:`,
-            row
-          );
+          skippedCount++;
+          // Only log first few skipped rows to avoid memory issues
+          if (skippedCount <= 5) {
+            console.warn(
+              `Skipping row ${indexOfRow} with missing date for system ${system.slug}`
+            );
+          }
           continue;
         }
 
@@ -68,26 +73,33 @@ async function syncSystemResults(systemId) {
         validResults.push(resultData);
         dateISOs.add(resultData.dateISO);
       } catch (error) {
-        console.error(
-          `Error mapping row for system ${system.slug}:`,
-          error.message,
-          row
-        );
+        errorCount++;
+        // Only log first few errors to avoid memory issues
+        if (errorCount <= 5) {
+          console.error(
+            `Error mapping row ${indexOfRow} for system ${system.slug}:`,
+            error.message
+          );
+        }
       }
     }
-    // console.log("validResults", validResults);
-    validResults.forEach((result) => {
-      console.warn(result);
-    });
+
+    if (skippedCount > 0) {
+      console.log(`Skipped ${skippedCount} rows with missing dates`);
+    }
+    if (errorCount > 0) {
+      console.log(`Encountered ${errorCount} errors while mapping rows`);
+    }
 
     if (!validResults.length) {
       console.log(`No valid data to sync for system ${system.slug}`);
       return { systemId, synced: 0, deleted: 0, errors: 0 };
     }
 
-    // Get date range from the data
-    const minDateISO = Array.from(dateISOs).sort()[0];
-    const maxDateISO = Array.from(dateISOs).sort().reverse()[0];
+    // Get date range from the data (more memory efficient)
+    const sortedDates = Array.from(dateISOs).sort();
+    const minDateISO = sortedDates[0];
+    const maxDateISO = sortedDates[sortedDates.length - 1];
 
     // Delete all existing records for this system within the date range
     // This ensures deleted/corrected rows in Google Sheets are removed from MongoDB
@@ -100,41 +112,69 @@ async function syncSystemResults(systemId) {
       `Deleted ${deleteResult.deletedCount} existing records for system ${system.slug} (date range: ${minDateISO} to ${maxDateISO})`
     );
 
-    // Insert all fresh data from Google Sheets
+    // Insert all fresh data from Google Sheets in batches to reduce memory usage
     let synced = 0;
     let errors = 0;
+    const INSERT_BATCH_SIZE = 500; // Process inserts in smaller batches
 
-    try {
-      // Use insertMany for better performance
-      const insertResult = await SystemResult.insertMany(validResults, {
-        ordered: false, // Continue inserting even if some fail
-      });
-      synced = insertResult.length;
-    } catch (error) {
-      // Handle partial insert failures
-      if (error.writeErrors) {
-        errors = error.writeErrors.length;
-        synced = error.insertedCount || 0;
-        console.error(
-          `Partial insert for system ${system.slug}: ${synced} inserted, ${errors} failed`
-        );
-      } else {
-        // If insertMany completely fails, try inserting one by one
-        console.warn(
-          `Bulk insert failed for system ${system.slug}, trying individual inserts...`
-        );
-        for (const resultData of validResults) {
-          try {
-            await SystemResult.create(resultData);
-            synced++;
-          } catch (err) {
-            console.error(
-              `Error inserting row for system ${system.slug}:`,
-              err.message
-            );
-            errors++;
+    // Process inserts in batches to avoid memory issues with large datasets
+    for (let i = 0; i < validResults.length; i += INSERT_BATCH_SIZE) {
+      const batch = validResults.slice(i, i + INSERT_BATCH_SIZE);
+
+      try {
+        // Use insertMany for better performance
+        const insertResult = await SystemResult.insertMany(batch, {
+          ordered: false, // Continue inserting even if some fail
+        });
+        synced += insertResult.length;
+
+        // Log progress for large datasets
+        if (validResults.length > INSERT_BATCH_SIZE) {
+          console.log(
+            `Inserted batch ${
+              Math.floor(i / INSERT_BATCH_SIZE) + 1
+            }/${Math.ceil(
+              validResults.length / INSERT_BATCH_SIZE
+            )} for system ${system.slug}`
+          );
+        }
+      } catch (error) {
+        // Handle partial insert failures
+        if (error.writeErrors) {
+          const batchErrors = error.writeErrors.length;
+          const batchSynced = error.insertedCount || 0;
+          errors += batchErrors;
+          synced += batchSynced;
+          console.error(
+            `Partial insert for batch of system ${system.slug}: ${batchSynced} inserted, ${batchErrors} failed`
+          );
+        } else {
+          // If insertMany completely fails, try inserting one by one for this batch
+          console.warn(
+            `Bulk insert failed for batch of system ${system.slug}, trying individual inserts...`
+          );
+          for (const resultData of batch) {
+            try {
+              await SystemResult.create(resultData);
+              synced++;
+            } catch (err) {
+              errors++;
+              // Only log first few errors to avoid memory issues
+              if (errors <= 5) {
+                console.error(
+                  `Error inserting row for system ${system.slug}:`,
+                  err.message
+                );
+              }
+            }
           }
         }
+      }
+
+      // Force garbage collection hint by clearing the batch reference
+      // (Node.js will GC when needed, but this helps)
+      if (i % (INSERT_BATCH_SIZE * 5) === 0 && global.gc) {
+        global.gc();
       }
     }
 
@@ -142,7 +182,8 @@ async function syncSystemResults(systemId) {
       `✅ Synced ${synced} results for system ${system.slug} (${deleteResult.deletedCount} deleted, ${errors} errors)`
     );
 
-    return {
+    // Clean up large arrays to help with memory
+    const result = {
       systemId,
       systemSlug: system.slug,
       synced,
@@ -151,6 +192,12 @@ async function syncSystemResults(systemId) {
       total: sheetData.length,
       dateRange: { min: minDateISO, max: maxDateISO },
     };
+
+    // Clear large arrays from memory (they'll be GC'd)
+    validResults.length = 0;
+    dateISOs.clear();
+
+    return result;
   } catch (error) {
     console.error(`Error syncing system ${systemId}:`, error.message);
     throw error;
