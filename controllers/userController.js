@@ -293,6 +293,7 @@ const registerAndSubscribe = async (req, res) => {
 // @desc    Get billing details
 // @route   GET /api/users/billing
 // @access  Private
+
 const getBillingDetails = async (req, res) => {
   try {
     const userId = req.user.id; // From your auth middleware
@@ -345,18 +346,23 @@ const getBillingDetails = async (req, res) => {
     );
     const product = await stripe.products.retrieve(price.product);
 
-    // Get next billing date - use Stripe API value (most accurate), fallback to database value
+    // Get next billing date - only if NOT cancelling
+    // If cancelling, don't show next billing date (frontend will show cancellation date instead)
     let nextBillingDate = null;
-    if (stripeSubscription.current_period_end) {
-      // Stripe returns Unix timestamp in seconds, convert to milliseconds for Date
-      nextBillingDate = new Date(stripeSubscription.current_period_end * 1000);
-    } else {
-      // Fallback to database value if Stripe doesn't have it (shouldn't happen for active subscriptions)
-      const updatedSubscription = await StripeSubscription.findById(
-        subscription._id
-      );
-      if (updatedSubscription?.currentPeriodEnd) {
-        nextBillingDate = updatedSubscription.currentPeriodEnd;
+    if (!subscription.cancelAtPeriodEnd) {
+      if (stripeSubscription.current_period_end) {
+        // Stripe returns Unix timestamp in seconds, convert to milliseconds for Date
+        nextBillingDate = new Date(
+          stripeSubscription.current_period_end * 1000
+        );
+      } else {
+        // Fallback to database value if Stripe doesn't have it
+        const updatedSubscription = await StripeSubscription.findById(
+          subscription._id
+        );
+        if (updatedSubscription?.currentPeriodEnd) {
+          nextBillingDate = updatedSubscription.currentPeriodEnd;
+        }
       }
     }
 
@@ -404,9 +410,18 @@ const getBillingDetails = async (req, res) => {
         price: (price.unit_amount / 100).toFixed(2),
         currency: price.currency.toUpperCase(),
         period: price.recurring?.interval || "month",
-        nextBillingDate: nextBillingDate,
+        nextBillingDate: nextBillingDate ? nextBillingDate.toISOString() : null,
         productId: subscription.productId,
         priceId: price.id,
+        stripeSubscriptionId: subscription.stripeSubscriptionId,
+        // Add cancellation fields from database
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd || false,
+        cancelAt: subscription.cancelAt
+          ? subscription.cancelAt.toISOString()
+          : null,
+        canceledAt: subscription.canceledAt
+          ? subscription.canceledAt.toISOString()
+          : null,
       },
       paymentMethod: paymentMethod
         ? {
@@ -434,7 +449,6 @@ const getBillingDetails = async (req, res) => {
     res.status(500).json({ message: "Failed to fetch billing data" });
   }
 };
-
 // Helper function
 function getPlanDescription(subscription, systems) {
   // Check metadata for system slugs
@@ -452,6 +466,560 @@ function getPlanDescription(subscription, systems) {
   }
 }
 
+// @desc    Cancel subscription
+// @route   POST /api/users/cancel-subscription
+// @access  Private
+const cancelSubscription = async (req, res) => {
+  try {
+    const { stripeSubscriptionId } = req.body;
+    const userId = req.user.id;
+
+    if (!stripeSubscriptionId) {
+      return res.status(400).json({ message: "Subscription ID is required" });
+    }
+
+    // Verify the subscription belongs to this user
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    // Check if already cancelled
+    if (subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message: "Subscription is already scheduled for cancellation",
+      });
+    }
+
+    // Cancel subscription in Stripe (at period end)
+    const canceledSubscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      {
+        cancel_at_period_end: true,
+      }
+    );
+
+    // Update subscription in database immediately
+    // (Webhook will also update these, but we update now for immediate UI feedback)
+    subscription.cancelAtPeriodEnd = true;
+    subscription.canceledAt = canceledSubscription.canceled_at
+      ? new Date(canceledSubscription.canceled_at * 1000)
+      : new Date();
+    subscription.cancelAt = canceledSubscription.cancel_at
+      ? new Date(canceledSubscription.cancel_at * 1000)
+      : canceledSubscription.current_period_end
+      ? new Date(canceledSubscription.current_period_end * 1000)
+      : null;
+    subscription.status = canceledSubscription.status; // Still 'active' but will be updated by webhook
+    await subscription.save();
+
+    res.json({
+      success: true,
+      message:
+        "Subscription will be cancelled at the end of the billing period",
+      cancelAt: canceledSubscription.cancel_at
+        ? new Date(canceledSubscription.cancel_at * 1000).toISOString()
+        : canceledSubscription.current_period_end
+        ? new Date(canceledSubscription.current_period_end * 1000).toISOString()
+        : null,
+    });
+  } catch (error) {
+    console.error("Error cancelling subscription:", error);
+    res.status(500).json({ message: "Failed to cancel subscription" });
+  }
+};
+
+// @desc    Resume subscription
+// @route   POST /api/users/resume-subscription
+// @access  Private
+const resumeSubscription = async (req, res) => {
+  try {
+    const { stripeSubscriptionId } = req.body;
+    const userId = req.user.id;
+
+    if (!stripeSubscriptionId) {
+      return res.status(400).json({ message: "Subscription ID is required" });
+    }
+
+    // Verify the subscription belongs to this user
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    // Check if subscription is actually scheduled for cancellation
+    if (!subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message: "Subscription is not scheduled for cancellation",
+      });
+    }
+
+    // Resume subscription in Stripe
+    const resumedSubscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      {
+        cancel_at_period_end: false,
+      }
+    );
+    console.log("resumedSubscription", resumedSubscription);
+    // Update subscription in database immediately
+    subscription.cancelAtPeriodEnd = false;
+    subscription.cancelAt = null;
+    // Keep canceledAt for historical record, but clear cancelAt
+    subscription.status = resumedSubscription.status;
+    await subscription.save();
+
+    console.log("subscription", subscription);
+
+    res.json({
+      success: true,
+      message: "Subscription resumed successfully",
+    });
+  } catch (error) {
+    console.error("Error resuming subscription:", error);
+    res.status(500).json({ message: "Failed to resume subscription" });
+  }
+};
+
+// @desc    Create Stripe Customer Portal session
+// @route   POST /api/users/create-portal-session
+// @access  Private
+
+const createPortalSession = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get Stripe customer
+    const stripeCustomer = await StripeCustomer.findOne({ userId });
+
+    if (!stripeCustomer) {
+      return res.status(404).json({ message: "No Stripe customer found" });
+    }
+
+    // Create Stripe Customer Portal session
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: stripeCustomer.stripeCustomerId,
+      return_url: `${process.env.FRONTEND_URL}/dashboard/billings`,
+    });
+
+    res.json({
+      url: portalSession.url,
+    });
+  } catch (error) {
+    console.error("Error creating portal session:", error);
+    res.status(500).json({ message: "Failed to create portal session" });
+  }
+};
+
+// @desc    Change subscription (upgrade/downgrade)
+// @route   POST /api/users/change-subscription
+// @access  Private
+
+const changeSubscription = async (req, res) => {
+  try {
+    const { stripeSubscriptionId, newProductId, newPriceId, systemSlugs } =
+      req.body;
+    const userId = req.user.id;
+
+    if (!stripeSubscriptionId || !newProductId || !newPriceId) {
+      return res.status(400).json({
+        message: "Subscription ID, product ID, and price ID are required",
+      });
+    }
+
+    // Verify the subscription belongs to this user
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    // Check if subscription is cancelled
+    if (subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message:
+          "Cannot change subscription while it is scheduled for cancellation. Please resume first.",
+      });
+    }
+
+    // Determine if this is an upgrade or downgrade
+    const currentProductId = subscription.productId;
+    const isUpgrade =
+      newProductId === "prod_TZZdcgHBZ13uZ9" || // All Systems Yearly
+      (newProductId === "prod_TZZcEMlv2cNNWl" && // All Systems Monthly
+        [
+          "prod_TZZbjLqthXdjxx",
+          "prod_TZZcUfjAmtJfkg",
+          "prod_TZZcuPVww3QyDm",
+        ].includes(currentProductId)); // From Single System
+
+    // Get current subscription from Stripe
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      stripeSubscriptionId
+    );
+
+    // Update the subscription item with new price
+    await stripe.subscriptions.update(stripeSubscriptionId, {
+      items: [
+        {
+          id: stripeSubscription.items.data[0].id, // Current subscription item ID
+          price: newPriceId, // New price ID
+        },
+      ],
+      // Proration behavior: create_prorations for upgrades, none for downgrades
+      proration_behavior: isUpgrade ? "create_prorations" : "none",
+      // For downgrades, schedule for period end. For upgrades, immediate.
+      billing_cycle_anchor: isUpgrade ? "now" : "unchanged",
+      metadata: {
+        userId: userId.toString(),
+        productId: newProductId,
+        systemSlugs: JSON.stringify(systemSlugs || []),
+      },
+    });
+
+    // Retrieve the updated subscription to get the current period dates
+    const updatedSubscription = await stripe.subscriptions.retrieve(
+      stripeSubscriptionId
+    );
+
+    // Validate and convert dates from Stripe response
+    // Note: current_period_start and current_period_end should be present after retrieval
+    const currentPeriodStart =
+      updatedSubscription.current_period_start &&
+      typeof updatedSubscription.current_period_start === "number"
+        ? new Date(updatedSubscription.current_period_start * 1000)
+        : null;
+
+    const currentPeriodEnd =
+      updatedSubscription.current_period_end &&
+      typeof updatedSubscription.current_period_end === "number"
+        ? new Date(updatedSubscription.current_period_end * 1000)
+        : null;
+
+    // If dates are still not available, calculate from billing_cycle_anchor and plan interval
+    let finalPeriodStart = currentPeriodStart;
+    let finalPeriodEnd = currentPeriodEnd;
+
+    if (!finalPeriodStart || isNaN(finalPeriodStart.getTime())) {
+      // Fallback: use billing_cycle_anchor
+      if (
+        updatedSubscription.billing_cycle_anchor &&
+        typeof updatedSubscription.billing_cycle_anchor === "number"
+      ) {
+        finalPeriodStart = new Date(
+          updatedSubscription.billing_cycle_anchor * 1000
+        );
+      } else {
+        // Last resort: use current date
+        finalPeriodStart = new Date();
+      }
+    }
+
+    if (!finalPeriodEnd || isNaN(finalPeriodEnd.getTime())) {
+      // Calculate period end based on plan interval
+      const plan = updatedSubscription.items.data[0]?.price;
+      if (plan && finalPeriodStart) {
+        const interval = plan.interval; // 'month' or 'year'
+        const intervalCount = plan.interval_count || 1;
+
+        finalPeriodEnd = new Date(finalPeriodStart);
+        if (interval === "month") {
+          finalPeriodEnd.setMonth(finalPeriodEnd.getMonth() + intervalCount);
+        } else if (interval === "year") {
+          finalPeriodEnd.setFullYear(
+            finalPeriodEnd.getFullYear() + intervalCount
+          );
+        } else if (interval === "day") {
+          finalPeriodEnd.setDate(finalPeriodEnd.getDate() + intervalCount);
+        } else if (interval === "week") {
+          finalPeriodEnd.setDate(finalPeriodEnd.getDate() + intervalCount * 7);
+        }
+      } else {
+        // Last resort: use current date + 1 month
+        finalPeriodEnd = new Date(finalPeriodStart || new Date());
+        finalPeriodEnd.setMonth(finalPeriodEnd.getMonth() + 1);
+      }
+    }
+
+    // Final validation
+    if (!finalPeriodStart || isNaN(finalPeriodStart.getTime())) {
+      console.error("Could not determine valid currentPeriodStart");
+      return res.status(500).json({
+        message: "Failed to update subscription: invalid period start date",
+      });
+    }
+
+    if (!finalPeriodEnd || isNaN(finalPeriodEnd.getTime())) {
+      console.error("Could not determine valid currentPeriodEnd");
+      return res.status(500).json({
+        message: "Failed to update subscription: invalid period end date",
+      });
+    }
+
+    // Update subscription in database
+    subscription.productId = newProductId;
+    subscription.plan = newPriceId; // Store price ID as plan
+    subscription.status = updatedSubscription.status;
+    subscription.currentPeriodStart = finalPeriodStart;
+    subscription.currentPeriodEnd = finalPeriodEnd;
+
+    // Clear cancellation fields if upgrading (since upgrade is immediate)
+    if (isUpgrade) {
+      subscription.cancelAtPeriodEnd = false;
+      subscription.cancelAt = null;
+      subscription.canceledAt = null;
+    }
+
+    // Update metadata with new system slugs
+    subscription.metadata = {
+      ...subscription.metadata,
+      productId: newProductId,
+      systemSlugs: JSON.stringify(systemSlugs || []),
+    };
+
+    await subscription.save();
+
+    res.json({
+      success: true,
+      message: isUpgrade
+        ? "Subscription upgraded successfully"
+        : "Subscription change scheduled successfully",
+      effectiveDate: isUpgrade
+        ? new Date().toISOString()
+        : finalPeriodEnd.toISOString(),
+    });
+  } catch (error) {
+    console.error("Error changing subscription:", error);
+    res.status(500).json({
+      message: error.message || "Failed to change subscription",
+    });
+  }
+};
+
+// @desc    Get user profile
+// @route   GET /api/users/profile
+// @access  Private
+const getUserProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select(
+      "firstName lastName email"
+    );
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    res.json({
+      firstName: user.firstName || "",
+      lastName: user.lastName || "",
+      email: user.email,
+    });
+  } catch (error) {
+    console.error("Error fetching user profile:", error);
+    res.status(500).json({ message: "Failed to fetch user profile" });
+  }
+};
+
+// @desc    Update user profile
+// @route   PUT /api/users/profile
+// @access  Private
+const updateUserProfile = async (req, res) => {
+  try {
+    const { firstName, lastName, email } = req.body;
+    // Validate required fields
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+    // Check if email is already taken by another user
+    const existingUser = await User.findOne({
+      email: email.toLowerCase().trim(),
+      _id: { $ne: req.user.id },
+    });
+    if (existingUser) {
+      return res.status(400).json({ message: "Email is already in use" });
+    }
+    // Update user
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      {
+        firstName: firstName?.trim() || "",
+        lastName: lastName?.trim() || "",
+        email: email.toLowerCase().trim(),
+      },
+      { new: true, runValidators: true }
+    ).select("firstName lastName email");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    res.json({
+      message: "Profile updated successfully",
+      user: {
+        firstName: user.firstName || "",
+        lastName: user.lastName || "",
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Error updating user profile:", error);
+    res.status(500).json({ message: "Failed to update profile" });
+  }
+};
+
+// @desc    Get user email preferences
+// @route   GET /api/users/email-preferences
+// @access  Private
+const getEmailPreferences = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("emailPreferences");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    res.json({
+      emailPreferences: user.emailPreferences || {
+        dailySelections: true,
+        resultsUpdates: true,
+        monthlyPerformanceReport: true,
+        systemUpdates: true,
+        billingReminders: true,
+        marketingEmails: true,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching email preferences:", error);
+    res.status(500).json({ message: "Failed to fetch email preferences" });
+  }
+};
+
+// @desc    Update user email preferences
+// @route   PUT /api/users/email-preferences
+// @access  Private
+const updateEmailPreferences = async (req, res) => {
+  try {
+    const { emailPreferences } = req.body;
+
+    if (!emailPreferences || typeof emailPreferences !== "object") {
+      return res.status(400).json({
+        message: "Email preferences object is required",
+      });
+    }
+
+    // Validate all preference fields are booleans
+    const validPreferences = {
+      dailySelections:
+        typeof emailPreferences.dailySelections === "boolean"
+          ? emailPreferences.dailySelections
+          : true,
+      resultsUpdates:
+        typeof emailPreferences.resultsUpdates === "boolean"
+          ? emailPreferences.resultsUpdates
+          : true,
+      monthlyPerformanceReport:
+        typeof emailPreferences.monthlyPerformanceReport === "boolean"
+          ? emailPreferences.monthlyPerformanceReport
+          : true,
+      systemUpdates:
+        typeof emailPreferences.systemUpdates === "boolean"
+          ? emailPreferences.systemUpdates
+          : true,
+      billingReminders:
+        typeof emailPreferences.billingReminders === "boolean"
+          ? emailPreferences.billingReminders
+          : true,
+      marketingEmails:
+        typeof emailPreferences.marketingEmails === "boolean"
+          ? emailPreferences.marketingEmails
+          : true,
+    };
+
+    // Update user
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { emailPreferences: validPreferences },
+      { new: true, runValidators: true }
+    ).select("emailPreferences");
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      message: "Email preferences updated successfully",
+      emailPreferences: user.emailPreferences,
+    });
+  } catch (error) {
+    console.error("Error updating email preferences:", error);
+    res.status(500).json({ message: "Failed to update email preferences" });
+  }
+};
+
+// @desc    Change user password
+// @route   PUT /api/users/change-password
+// @access  Private
+const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    // Validate required fields
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        message: "Current password and new password are required",
+      });
+    }
+
+    // Validate new password length
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        message: "New password must be at least 8 characters long",
+      });
+    }
+
+    // Get user with password
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Verify current password
+    const isPasswordValid = await user.comparePassword(currentPassword);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: "Current password is incorrect" });
+    }
+
+    // Check if new password is different from current password
+    const isSamePassword = await user.comparePassword(newPassword);
+    if (isSamePassword) {
+      return res.status(400).json({
+        message: "New password must be different from current password",
+      });
+    }
+
+    // Update password (pre-save hook will hash it automatically)
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: "Password changed successfully" });
+  } catch (error) {
+    console.error("Error changing password:", error);
+    res.status(500).json({ message: "Failed to change password" });
+  }
+};
+
 module.exports = {
   getUsers,
   getUser,
@@ -461,4 +1029,13 @@ module.exports = {
   loginUser,
   registerAndSubscribe,
   getBillingDetails,
+  cancelSubscription,
+  resumeSubscription,
+  createPortalSession,
+  changeSubscription,
+  getUserProfile,
+  updateUserProfile,
+  getEmailPreferences,
+  updateEmailPreferences,
+  changePassword,
 };

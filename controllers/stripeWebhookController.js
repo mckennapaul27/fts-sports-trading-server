@@ -103,18 +103,78 @@ const handleCheckoutSessionCompleted = async (session) => {
 };
 
 const handleSubscriptionUpdated = async (subscription) => {
-  await StripeSubscription.findOneAndUpdate(
-    { stripeSubscriptionId: subscription.id },
-    {
+  try {
+    // Check if subscription exists in database
+    const existingSubscription = await StripeSubscription.findOne({
+      stripeSubscriptionId: subscription.id,
+    });
+
+    if (!existingSubscription) {
+      console.log(
+        `⚠️  Subscription ${subscription.id} not found in database. Skipping update.`
+      );
+      return;
+    }
+
+    // Build update object with only fields that exist
+    const updateData = {
       status: subscription.status,
-      plan: subscription.items.data[0]?.plan.id,
-      productId: subscription.items.data[0]?.plan.product,
-      currentPeriodStart: new Date(subscription.current_period_start * 1000),
-      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
-    },
-    { new: true }
-  );
-  console.log(`Subscription updated: ${subscription.id}`);
+    };
+
+    // Update plan and productId if available
+    if (subscription.items?.data?.[0]?.plan) {
+      updateData.plan = subscription.items.data[0].plan.id;
+      updateData.productId = subscription.items.data[0].plan.product;
+    }
+
+    // Update current period dates if available (these are at root level, not in items)
+    if (subscription.current_period_start) {
+      const date = new Date(subscription.current_period_start * 1000);
+      if (!isNaN(date.getTime())) {
+        updateData.currentPeriodStart = date;
+      }
+    }
+    if (subscription.current_period_end) {
+      const date = new Date(subscription.current_period_end * 1000);
+      if (!isNaN(date.getTime())) {
+        updateData.currentPeriodEnd = date;
+      }
+    }
+
+    // Update cancellation fields if available
+    if (subscription.cancel_at) {
+      const date = new Date(subscription.cancel_at * 1000);
+      if (!isNaN(date.getTime())) {
+        updateData.cancelAt = date;
+      }
+    }
+    if (subscription.canceled_at) {
+      const date = new Date(subscription.canceled_at * 1000);
+      if (!isNaN(date.getTime())) {
+        updateData.canceledAt = date;
+      }
+    }
+    if (subscription.cancel_at_period_end !== undefined) {
+      updateData.cancelAtPeriodEnd = subscription.cancel_at_period_end;
+    }
+
+    await StripeSubscription.findOneAndUpdate(
+      { stripeSubscriptionId: subscription.id },
+      updateData,
+      { new: true }
+    );
+    console.log(`✅ Subscription updated: ${subscription}`);
+  } catch (error) {
+    console.error(
+      `❌ Error updating subscription ${JSON.stringify(
+        subscription,
+        null,
+        2
+      )}:`,
+      error.message
+    );
+    throw error;
+  }
 };
 
 const handleSubscriptionDeleted = async (subscription) => {
@@ -208,6 +268,8 @@ exports.handleStripeWebhook = async (req, res) => {
     payload: event.data.object,
   });
 
+  console.log("event", event.type);
+
   // Handle the event
   try {
     switch (event.type) {
@@ -230,7 +292,7 @@ exports.handleStripeWebhook = async (req, res) => {
         console.log(`Unhandled event type ${event.type}`);
     }
   } catch (error) {
-    console.error(`Error handling webhook event ${event.id}:`, error);
+    console.error(`Error handling webhook event ${event}:`, error);
     // Optionally, you could update the WebHookEvent record to mark it as failed
     return res.status(500).json({ error: "Webhook handler failed." });
   }

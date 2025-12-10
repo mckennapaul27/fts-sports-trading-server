@@ -108,7 +108,7 @@ const startServer = async () => {
     // Cron expression: "*/5 * * * *" means every 5 minutes
     // Set scheduled: true to prevent overlapping executions
     cron.schedule(
-      "*/55 * * * *",
+      "*/5 * * * *",
       async () => {
         // Skip if sync is already running
         if (isSyncRunning) {
@@ -121,7 +121,7 @@ const startServer = async () => {
 
         console.log("🔄 Running scheduled sync from Google Sheets...");
         try {
-          // await syncAllSystems();
+          await syncAllSystems();
           const duration = ((Date.now() - startTime) / 1000).toFixed(2);
           console.log(`✅ Sync completed in ${duration} seconds`);
         } catch (error) {

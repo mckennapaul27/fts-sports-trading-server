@@ -9,11 +9,43 @@ const {
   loginUser,
   registerAndSubscribe,
   getBillingDetails,
+  cancelSubscription,
+  resumeSubscription,
+  createPortalSession,
+  changeSubscription,
+  getUserProfile,
+  updateUserProfile,
+  getEmailPreferences,
+  updateEmailPreferences,
+  changePassword,
 } = require("../controllers/userController");
 const { auth } = require("../middleware/auth");
 
 // /api/users/billing
 router.get("/billing", auth, getBillingDetails);
+
+// /api/users/cancel-subscription
+router.post("/cancel-subscription", auth, cancelSubscription);
+
+// /api/users/resume-subscription
+router.post("/resume-subscription", auth, resumeSubscription);
+
+// /api/users/create-portal-session
+router.post("/create-portal-session", auth, createPortalSession);
+
+// /api/users/change-subscription
+router.post("/change-subscription", auth, changeSubscription);
+
+// /api/users/profile
+router.get("/profile", auth, getUserProfile);
+router.put("/profile", auth, updateUserProfile);
+
+// /api/users/email-preferences
+router.get("/email-preferences", auth, getEmailPreferences);
+router.put("/email-preferences", auth, updateEmailPreferences);
+
+// /api/users/change-password
+router.put("/change-password", auth, changePassword);
 
 // /api/users/get
 router.get("/", getUsers);

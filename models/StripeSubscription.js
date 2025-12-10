@@ -24,12 +24,12 @@ const stripeSubscriptionSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    currentPeriodStart: {
-      type: Date,
-    },
-    currentPeriodEnd: {
-      type: Date,
-    },
+    currentPeriodStart: { type: Date, required: true },
+    currentPeriodEnd: { type: Date, required: true },
+
+    cancelAt: { type: Date, default: null },
+    canceledAt: { type: Date, default: null },
+    cancelAtPeriodEnd: { type: Boolean, default: false },
     metadata: {
       type: Object,
     },

@@ -30,6 +30,33 @@ const userSchema = new Schema(
       default: "user",
     },
     activeSystemIds: [{ type: Schema.Types.ObjectId, ref: "System" }],
+    // Email notification preferences
+    emailPreferences: {
+      dailySelections: {
+        type: Boolean,
+        default: true,
+      },
+      resultsUpdates: {
+        type: Boolean,
+        default: true,
+      },
+      monthlyPerformanceReport: {
+        type: Boolean,
+        default: true,
+      },
+      systemUpdates: {
+        type: Boolean,
+        default: true,
+      },
+      billingReminders: {
+        type: Boolean,
+        default: true,
+      },
+      marketingEmails: {
+        type: Boolean,
+        default: true,
+      },
+    },
   },
   { timestamps: true }
 );
@@ -46,7 +73,5 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-const User = mongoose.model("User", userSchema);
+const User = model("User", userSchema);
 module.exports = User;
-
-module.exports = model("User", userSchema);
