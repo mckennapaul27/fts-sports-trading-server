@@ -200,7 +200,7 @@ const deleteUser = async (req, res) => {
 const registerAndSubscribe = async (req, res) => {
   const { email, password, firstName, lastName, productId, systemSlugs } =
     req.body;
-  console.log("req.body", req.body);
+  // console.log("req.body", req.body);
 
   if (!productId) {
     return res.status(400).json({ message: "Product ID is required." });
@@ -230,7 +230,7 @@ const registerAndSubscribe = async (req, res) => {
       lastName,
       role: "user",
     });
-    console.log("user", user);
+    // console.log("user", user);
     await user.save();
 
     // 4. Link the Stripe customer to the user in your database
@@ -238,7 +238,7 @@ const registerAndSubscribe = async (req, res) => {
       userId: user._id,
       stripeCustomerId: stripeCustomer.id,
     });
-    console.log("customerMapping", customerMapping);
+    // console.log("customerMapping", customerMapping);
     await customerMapping.save();
 
     // 5. Find the active price for the given product ID
@@ -247,7 +247,7 @@ const registerAndSubscribe = async (req, res) => {
       active: true,
       limit: 1,
     });
-    console.log("prices", prices);
+    // console.log("prices", prices);
 
     if (prices.data.length === 0) {
       return res
@@ -278,7 +278,7 @@ const registerAndSubscribe = async (req, res) => {
         },
       },
     });
-    console.log("session", session);
+    // console.log("session", session);
 
     // 7. Return the session URL to the frontend
     res.json({ url: session.url });
@@ -287,6 +287,92 @@ const registerAndSubscribe = async (req, res) => {
     res
       .status(500)
       .json({ message: "An error occurred during the signup process." });
+  }
+};
+
+// @desc Exsiting User Subscribe
+// @route   POST /api/users/existing-user-subscribe
+// @access  Private
+const existingUserSubscribe = async (req, res) => {
+  const { productId, systemSlugs } = req.body;
+  // console.log("req.body", req.body);
+  const userId = req.user.id;
+  const user = await User.findById(userId);
+  if (!user) {
+    return res.status(404).json({ message: "User not found." });
+  }
+
+  if (!productId) {
+    return res.status(400).json({ message: "Product ID is required." });
+  }
+
+  try {
+    let stripeCustomerId;
+    // 1. Check if user already has a Stripe Customer
+    const existingStripeCustomer = await StripeCustomer.findOne({ userId });
+    if (existingStripeCustomer) {
+      // Use the existing Stripe customer ID from the database
+      stripeCustomerId = existingStripeCustomer.stripeCustomerId;
+    } else {
+      // Create a new Stripe Customer
+      const stripeCustomer = await stripe.customers.create({
+        email: user.email,
+        name: `${user.firstName} ${user.lastName}`,
+      });
+      stripeCustomerId = stripeCustomer.id;
+      // Save the mapping to the database
+      await StripeCustomer.create({
+        userId,
+        stripeCustomerId: stripeCustomer.id,
+      });
+    }
+
+    // 5. Find the active price for the given product ID
+    const prices = await stripe.prices.list({
+      product: productId,
+      active: true,
+      limit: 1,
+    });
+    // console.log("prices", prices);
+
+    if (prices.data.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "No active price found for the given product." });
+    }
+    const priceId = prices.data[0].id;
+
+    // 6. Create a Stripe Checkout Session for the subscription
+    const session = await stripe.checkout.sessions.create({
+      customer: stripeCustomerId,
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: "subscription",
+      success_url: `${process.env.FRONTEND_URL}/dashboard/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/dashboard/payment/cancelled`,
+      // Pass the userId in metadata to use it in webhooks
+      subscription_data: {
+        metadata: {
+          userId: user._id.toString(),
+          productId: productId,
+          systemSlugs: JSON.stringify(systemSlugs),
+        },
+      },
+    });
+    // console.log("session", session);
+
+    // 7. Return the session URL to the frontend
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error("Error in existingUserSubscribe:", error);
+    res
+      .status(500)
+      .json({ message: "An error occurred during the subscription process." });
   }
 };
 
@@ -569,7 +655,7 @@ const resumeSubscription = async (req, res) => {
         cancel_at_period_end: false,
       }
     );
-    console.log("resumedSubscription", resumedSubscription);
+    // console.log("resumedSubscription", resumedSubscription);
     // Update subscription in database immediately
     subscription.cancelAtPeriodEnd = false;
     subscription.cancelAt = null;
@@ -577,7 +663,7 @@ const resumeSubscription = async (req, res) => {
     subscription.status = resumedSubscription.status;
     await subscription.save();
 
-    console.log("subscription", subscription);
+    // console.log("subscription", subscription);
 
     res.json({
       success: true,
@@ -789,6 +875,61 @@ const changeSubscription = async (req, res) => {
     };
 
     await subscription.save();
+
+    // Update user's activeSystemIds based on all active subscriptions
+    // This ensures we aggregate all subscriptions if user has multiple
+    // The webhook will also update this, but we update now for immediate effect
+    try {
+      const StripeSubscription = require("../models/StripeSubscription");
+      const System = require("../models/System");
+
+      // Find all active subscriptions for the user
+      const activeSubscriptions = await StripeSubscription.find({
+        userId,
+        status: { $in: ["active", "trialing"] },
+      });
+
+      // Collect all system slugs from all active subscriptions
+      const allSystemSlugs = new Set();
+      for (const sub of activeSubscriptions) {
+        if (sub.metadata && sub.metadata.systemSlugs) {
+          try {
+            const parsed = JSON.parse(sub.metadata.systemSlugs);
+            if (Array.isArray(parsed)) {
+              parsed.forEach((slug) => allSystemSlugs.add(slug));
+            }
+          } catch (e) {
+            // If parsing fails, skip this subscription's systems
+            console.error(
+              `Error parsing systemSlugs for subscription ${sub.stripeSubscriptionId}:`,
+              e
+            );
+          }
+        }
+      }
+
+      // Look up all systems by their slugs
+      const systems = await System.find({
+        slug: { $in: Array.from(allSystemSlugs) },
+      });
+
+      // Update user's activeSystemIds
+      const user = await User.findById(userId);
+      if (user) {
+        user.activeSystemIds = systems.map((system) => system._id);
+        await user.save();
+        console.log(
+          `User ${userId} activeSystemIds updated in changeSubscription:`,
+          user.activeSystemIds
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Error updating user activeSystemIds in changeSubscription:",
+        error
+      );
+      // Don't fail the request if this fails, but log it
+    }
 
     res.json({
       success: true,
@@ -1028,6 +1169,7 @@ module.exports = {
   deleteUser,
   loginUser,
   registerAndSubscribe,
+  existingUserSubscribe,
   getBillingDetails,
   cancelSubscription,
   resumeSubscription,

@@ -240,7 +240,7 @@ function mapToSystemResult(sheetRow, systemId) {
     placePL: toNumber(sheetRow["Place P/L"]),
     runningPlacePL: toNumber(sheetRow["Running P/L (Place)"]),
   };
-  //   console.log("mapped", mapped);
+  console.log("mapped", mapped);
 
   return mapped;
 }

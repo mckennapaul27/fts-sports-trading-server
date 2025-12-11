@@ -82,7 +82,7 @@ const getSystemPerformance = async (req, res) => {
     const totalBets = results.length;
     const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
 
-    console.log("totalPL", totalPL);
+    // console.log("totalPL", totalPL);
 
     // Calculate strike rate (wins / total bets)
     const wins = results.filter(
@@ -236,8 +236,8 @@ const getAllSystemsWithStats = async (req, res) => {
         const totalBets = results.length;
         const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
 
-        console.log("totalBets", totalBets);
-        console.log("totalPL", totalPL);
+        // console.log("totalBets", totalBets);
+        // console.log("totalPL", totalPL);
 
         // Calculate strike rate (for lay bets, "LOST" = win)
         const wins = results.filter(
@@ -247,7 +247,7 @@ const getAllSystemsWithStats = async (req, res) => {
 
         // Calculate ROI (assuming 1pt level stakes, ROI = totalPL / totalBets * 100)
         const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
-        console.log("roi", roi);
+        // console.log("roi", roi);
 
         return {
           systemId: system._id,

@@ -18,6 +18,7 @@ const {
   getEmailPreferences,
   updateEmailPreferences,
   changePassword,
+  existingUserSubscribe,
 } = require("../controllers/userController");
 const { auth } = require("../middleware/auth");
 
@@ -46,6 +47,9 @@ router.put("/email-preferences", auth, updateEmailPreferences);
 
 // /api/users/change-password
 router.put("/change-password", auth, changePassword);
+
+// /api/users/existing-user-subscribe
+router.post("/existing-user-subscribe", auth, existingUserSubscribe);
 
 // /api/users/get
 router.get("/", getUsers);

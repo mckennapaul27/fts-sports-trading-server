@@ -7,6 +7,71 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+/**
+ * Recalculate and update user's activeSystemIds based on all active subscriptions
+ * This ensures activeSystemIds is accurate even if user has multiple subscriptions
+ */
+async function updateUserActiveSystemIds(userId) {
+  try {
+    // Find all active subscriptions for the user
+    const activeSubscriptions = await StripeSubscription.find({
+      userId,
+      status: { $in: ["active", "trialing"] },
+    });
+
+    if (activeSubscriptions.length === 0) {
+      // No active subscriptions, clear activeSystemIds
+      const user = await User.findById(userId);
+      if (user) {
+        user.activeSystemIds = [];
+        await user.save();
+        console.log(
+          `User ${userId} activeSystemIds cleared (no active subscriptions)`
+        );
+      }
+      return;
+    }
+
+    // Collect all system slugs from all active subscriptions
+    const allSystemSlugs = new Set();
+    for (const sub of activeSubscriptions) {
+      if (sub.metadata && sub.metadata.systemSlugs) {
+        try {
+          const parsed = JSON.parse(sub.metadata.systemSlugs);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((slug) => allSystemSlugs.add(slug));
+          }
+        } catch (e) {
+          // If parsing fails, skip this subscription's systems
+          console.error(
+            `Error parsing systemSlugs for subscription ${sub.stripeSubscriptionId}:`,
+            e
+          );
+        }
+      }
+    }
+
+    // Look up all systems by their slugs
+    const systems = await System.find({
+      slug: { $in: Array.from(allSystemSlugs) },
+    });
+
+    // Update user's activeSystemIds
+    const user = await User.findById(userId);
+    if (user) {
+      user.activeSystemIds = systems.map((system) => system._id);
+      await user.save();
+      console.log(
+        `User ${userId} activeSystemIds recalculated:`,
+        user.activeSystemIds
+      );
+    }
+  } catch (error) {
+    console.error(`Error updating activeSystemIds for user ${userId}:`, error);
+    throw error;
+  }
+}
+
 const handleCheckoutSessionCompleted = async (session) => {
   const subscriptionId = session.subscription;
 
@@ -82,23 +147,16 @@ const handleCheckoutSessionCompleted = async (session) => {
 
   console.log(`Subscription created for user: ${userId}`);
 
-  // Update user's active system IDs
-  const user = await User.findById(userId);
-  if (!user) {
-    console.error(`User not found: ${userId}`);
-    return;
-  }
-  // Parse systemSlugs from JSON string back to array, then look up System ObjectIds
+  // Update user's active system IDs by recalculating from all active subscriptions
+  // This ensures we aggregate all subscriptions if user has multiple
   try {
-    const parsedSystemSlugs = JSON.parse(systemSlugs);
-    // Look up Systems by slug and get their ObjectIds
-    const systems = await System.find({ slug: { $in: parsedSystemSlugs } });
-    user.activeSystemIds = systems.map((system) => system._id);
-    await user.save();
-    console.log("User updated with activeSystemIds:", user.activeSystemIds);
-  } catch (parseError) {
-    console.error("Error parsing systemSlugs:", parseError);
-    console.error("systemSlugs value:", systemSlugs);
+    await updateUserActiveSystemIds(userId);
+  } catch (error) {
+    console.error(
+      "Error updating activeSystemIds in handleCheckoutSessionCompleted:",
+      error
+    );
+    // Don't throw - log the error but don't fail the webhook
   }
 };
 
@@ -158,12 +216,51 @@ const handleSubscriptionUpdated = async (subscription) => {
       updateData.cancelAtPeriodEnd = subscription.cancel_at_period_end;
     }
 
-    await StripeSubscription.findOneAndUpdate(
+    const updatedSubscription = await StripeSubscription.findOneAndUpdate(
       { stripeSubscriptionId: subscription.id },
       updateData,
       { new: true }
     );
-    console.log(`✅ Subscription updated: ${subscription}`);
+    console.log(`✅ Subscription updated: ${subscription.id}`);
+
+    // Update user's activeSystemIds if systemSlugs in metadata changed
+    // Check if metadata.systemSlugs exists and has changed
+    if (
+      subscription.metadata &&
+      subscription.metadata.systemSlugs &&
+      updatedSubscription
+    ) {
+      try {
+        const userId = updatedSubscription.userId;
+        const systemSlugs = subscription.metadata.systemSlugs;
+
+        // Parse systemSlugs (it might be a JSON string or already an array)
+        let parsedSystemSlugs;
+        try {
+          parsedSystemSlugs = JSON.parse(systemSlugs);
+        } catch (e) {
+          // If parsing fails, assume it's already an array or handle as string
+          parsedSystemSlugs = Array.isArray(systemSlugs)
+            ? systemSlugs
+            : [systemSlugs];
+        }
+
+        if (Array.isArray(parsedSystemSlugs) && parsedSystemSlugs.length > 0) {
+          // Use the helper function to recalculate activeSystemIds
+          // This ensures we aggregate all active subscriptions if user has multiple
+          await updateUserActiveSystemIds(userId);
+        } else {
+          // If no system slugs, recalculate anyway to clear if needed
+          await updateUserActiveSystemIds(userId);
+        }
+      } catch (error) {
+        console.error(
+          "Error updating user activeSystemIds in handleSubscriptionUpdated:",
+          error
+        );
+        // Don't throw - log the error but don't fail the webhook
+      }
+    }
   } catch (error) {
     console.error(
       `❌ Error updating subscription ${JSON.stringify(
@@ -178,11 +275,25 @@ const handleSubscriptionUpdated = async (subscription) => {
 };
 
 const handleSubscriptionDeleted = async (subscription) => {
-  await StripeSubscription.findOneAndUpdate(
+  const updatedSubscription = await StripeSubscription.findOneAndUpdate(
     { stripeSubscriptionId: subscription.id },
-    { status: "canceled" }
+    { status: "canceled" },
+    { new: true }
   );
   console.log(`Subscription canceled: ${subscription.id}`);
+
+  // Recalculate user's activeSystemIds based on remaining active subscriptions
+  if (updatedSubscription && updatedSubscription.userId) {
+    try {
+      await updateUserActiveSystemIds(updatedSubscription.userId);
+    } catch (error) {
+      console.error(
+        `Error updating activeSystemIds after subscription deletion:`,
+        error
+      );
+      // Don't throw - log the error but don't fail the webhook
+    }
+  }
 };
 
 const handleInvoicePaymentFailed = async (invoice) => {

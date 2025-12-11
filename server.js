@@ -13,6 +13,7 @@ const subscriptionRoutes = require("./routes/subscriptionRoutes");
 const promotionRoutes = require("./routes/promotionRoutes");
 const systemResultRoutes = require("./routes/systemResultRoutes");
 const performanceRoutes = require("./routes/performanceRoutes");
+const selectionRoutes = require("./routes/selectionRoutes");
 
 const stripeWebhookController = require("./controllers/stripeWebhookController");
 
@@ -81,6 +82,7 @@ app.use("/api/subscriptions", subscriptionRoutes);
 app.use("/api/promotions", promotionRoutes);
 app.use("/api/system-results", systemResultRoutes);
 app.use("/api/performance", performanceRoutes);
+app.use("/api/selections", selectionRoutes);
 
 // Basic route
 app.get("/", (req, res) => {
@@ -102,6 +104,10 @@ const startServer = async () => {
     await connectDB();
 
     // sync all systems
+    if (process.env.NODE_ENV === "production") {
+      await syncAllSystems();
+    }
+
     // await syncAllSystems();
 
     // await syncSystemResults("6927079fe504d7070a1e2cb3");
@@ -110,10 +116,12 @@ const startServer = async () => {
     // await SystemResult.deleteMany({});
 
     // Set up cron job to sync Google Sheets every 5 minutes
+    const cronTime =
+      process.env.NODE_ENV === "production" ? "*/5 * * * *" : "*/55 * * * *";
     // Cron expression: "*/5 * * * *" means every 5 minutes
     // Set scheduled: true to prevent overlapping executions
     cron.schedule(
-      "*/5 * * * *",
+      cronTime,
       async () => {
         // Skip if sync is already running
         if (isSyncRunning) {

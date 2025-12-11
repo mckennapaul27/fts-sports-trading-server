@@ -101,15 +101,15 @@ async function syncSystemResults(systemId) {
     const minDateISO = sortedDates[0];
     const maxDateISO = sortedDates[sortedDates.length - 1];
 
-    // Delete all existing records for this system within the date range
-    // This ensures deleted/corrected rows in Google Sheets are removed from MongoDB
+    // Delete ALL existing records for this system
+    // This ensures a true full sync - any records deleted from Google Sheets
+    // (including those outside the current date range) are removed from MongoDB
     const deleteResult = await SystemResult.deleteMany({
       systemId: systemId,
-      dateISO: { $gte: minDateISO, $lte: maxDateISO },
     });
 
     console.log(
-      `Deleted ${deleteResult.deletedCount} existing records for system ${system.slug} (date range: ${minDateISO} to ${maxDateISO})`
+      `Deleted ${deleteResult.deletedCount} existing records for system ${system.slug} (full sync - all records removed)`
     );
 
     // Insert all fresh data from Google Sheets in batches to reduce memory usage
