@@ -29,6 +29,7 @@ const whiteList = [
   /bunkerdigital\.com$/,
   /bunker-digital-fe-new-tw.vercel\.app$/,
   /fts-sports-trading-fe.vercel\.app$/,
+  /fortissportstrading\.com$/,
 ];
 
 if (process.env.NODE_ENV !== "production") {
