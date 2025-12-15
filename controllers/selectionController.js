@@ -36,13 +36,55 @@ async function checkSystemAccess(user, systemId) {
   return userSystemIds.includes(systemIdStr);
 }
 
+// Calculate winPL based on result and BSP
+// Formula: 1 - BSP for WON, 0.98 for LOST/PLACED
+function calculateWinPL(result, winBsp) {
+  const upperResult = result.toUpperCase();
+  if (upperResult === "WON") {
+    return 1 - winBsp; // Negative value (loss for lay bet)
+  } else if (upperResult === "LOST" || upperResult === "PLACED") {
+    return 0.98; // 1pt - 2% commission
+  }
+  return 0;
+}
+
+// Calculate placePL based on result and placeBSP
+// If horse WON or PLACED, the place lay loses (negative)
+// If horse LOST, the place lay wins (keeps stake minus commission)
+// If WON without placeBSP, return 1.0 (stake returned)
+function calculatePlacePL(result, placeBsp) {
+  const upperResult = result.toUpperCase();
+  if (upperResult === "WON") {
+    if (placeBsp !== null && placeBsp !== undefined) {
+      return 1 - placeBsp; // Negative value (loss for lay bet)
+    }
+    return 1.0; // Stake returned if no placeBSP
+  } else if (upperResult === "PLACED") {
+    return 1 - placeBsp; // Negative value (loss for lay bet)
+  }
+  // For LOST, place bet wins (keeps stake minus commission)
+  return 0.98;
+}
+
 // @desc    Get all daily selections
 // @route   GET /api/selections
 // @access  Private (requires subscription to system)
 const getSelections = async (req, res) => {
   try {
-    const { systemId, dateISO, startDate, endDate, isNew } = req.query;
+    const {
+      systemId,
+      dateISO,
+      startDate,
+      endDate,
+      isNew,
+      limit,
+      offset,
+      sortBy,
+      sortOrder,
+    } = req.query;
     const query = {};
+
+    console.log("req.query", req.query);
 
     // If systemId is provided, verify user has access
     if (systemId) {
@@ -65,7 +107,10 @@ const getSelections = async (req, res) => {
           return res.status(200).json({
             success: true,
             count: 0,
+            total: 0,
             data: [],
+            hasMore: false,
+            nextOffset: null,
           });
         }
         query.systemId = { $in: req.user.activeSystemIds };
@@ -78,18 +123,58 @@ const getSelections = async (req, res) => {
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) query.date.$lte = new Date(endDate);
+      if (endDate) {
+        // Set to end of day
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.date.$lte = end;
+      }
     }
 
-    const selections = await SystemSelection.find(query)
+    // Parse pagination parameters
+    const limitNum = limit ? parseInt(limit, 10) : null;
+    const offsetNum = offset ? parseInt(offset, 10) : 0;
+
+    // Build sort object
+    const sortField = sortBy || "date";
+    const order = sortOrder === "asc" ? 1 : -1;
+    const sortObj = { [sortField]: order };
+
+    // If sorting by date, add time as secondary sort
+    if (sortField === "date") {
+      sortObj.time = 1;
+    }
+
+    console.log("sortObj", sortObj);
+    console.log("query", query);
+
+    // Get total count
+    const total = await SystemSelection.countDocuments(query);
+
+    // Build query with pagination
+    let selectionsQuery = SystemSelection.find(query)
       .populate("systemId", "name slug")
       .populate("createdBy", "firstName lastName email")
-      .sort({ date: -1, time: 1 });
+      .sort(sortObj);
+
+    // Apply pagination if limit is provided
+    if (limitNum !== null) {
+      selectionsQuery = selectionsQuery.skip(offsetNum).limit(limitNum);
+    }
+
+    const selections = await selectionsQuery;
+
+    // Calculate pagination metadata
+    const hasMore = limitNum !== null ? offsetNum + limitNum < total : false;
+    const nextOffset = hasMore ? offsetNum + limitNum : null;
 
     res.status(200).json({
       success: true,
       count: selections.length,
+      total,
       data: selections,
+      hasMore,
+      nextOffset,
     });
   } catch (error) {
     res.status(500).json({
@@ -241,6 +326,15 @@ const createSelection = async (req, res) => {
       });
     }
 
+    // Get the maximum rowOrder for this system and increment by 1
+    const lastSelection = await SystemSelection.findOne({ systemId })
+      .sort({ rowOrder: -1 })
+      .select("rowOrder");
+    const rowOrder =
+      lastSelection && lastSelection.rowOrder !== null
+        ? lastSelection.rowOrder + 1
+        : 1;
+
     // Create selection
     const selection = await SystemSelection.create({
       systemId,
@@ -252,6 +346,7 @@ const createSelection = async (req, res) => {
       horse,
       isNew: true,
       createdBy: req.user.id,
+      rowOrder,
     });
 
     const populatedSelection = await SystemSelection.findById(selection._id)
@@ -286,6 +381,9 @@ const createBulkSelections = async (req, res) => {
 
     const createdSelections = [];
     const errors = [];
+
+    // Group selections by systemId to calculate rowOrder efficiently
+    const systemRowOrders = {};
 
     for (const [index, selectionData] of selections.entries()) {
       try {
@@ -325,6 +423,19 @@ const createBulkSelections = async (req, res) => {
           continue;
         }
 
+        // Get or calculate rowOrder for this system
+        if (!systemRowOrders[systemId]) {
+          const lastSelection = await SystemSelection.findOne({ systemId })
+            .sort({ rowOrder: -1 })
+            .select("rowOrder");
+          systemRowOrders[systemId] =
+            lastSelection && lastSelection.rowOrder !== null
+              ? lastSelection.rowOrder
+              : 0;
+        }
+        systemRowOrders[systemId] += 1;
+        const rowOrder = systemRowOrders[systemId];
+
         const selection = await SystemSelection.create({
           systemId,
           dateISO,
@@ -335,6 +446,7 @@ const createBulkSelections = async (req, res) => {
           horse,
           isNew: true,
           createdBy: req.user.id,
+          rowOrder,
         });
 
         createdSelections.push(selection);
@@ -434,13 +546,101 @@ const updateSelection = async (req, res) => {
 // @access  Admin
 const deleteSelection = async (req, res) => {
   try {
-    const selection = await SystemSelection.findByIdAndDelete(req.params.id);
+    const selection = await SystemSelection.findById(req.params.id);
 
     if (!selection) {
       return res.status(404).json({
         success: false,
         error: "Selection not found",
       });
+    }
+
+    // If the selection has results, we need to recalculate running totals for subsequent selections
+    const currentRowOrder = selection.rowOrder;
+    const hadResults = selection.hasResult;
+    const deletedWinPL = selection.winPL || 0;
+    const deletedPlacePL = selection.placePL;
+
+    // Delete the selection
+    await SystemSelection.findByIdAndDelete(req.params.id);
+
+    // If this selection had results, recalculate running totals for subsequent selections
+    if (
+      hadResults &&
+      currentRowOrder !== null &&
+      currentRowOrder !== undefined
+    ) {
+      // Get all subsequent selections (by rowOrder)
+      const subsequentSelections = await SystemSelection.find({
+        systemId: selection.systemId,
+        rowOrder: { $gt: currentRowOrder },
+      })
+        .sort({ rowOrder: 1 })
+        .select("_id winPL placePL");
+
+      // Recalculate running totals for subsequent selections
+      // First, get the running totals up to (but not including) the deleted selection
+      const previousSelections = await SystemSelection.find({
+        systemId: selection.systemId,
+        rowOrder: { $lt: currentRowOrder },
+      })
+        .sort({ rowOrder: 1 })
+        .select("winPL placePL");
+
+      // Calculate running totals up to the deleted selection
+      let currentRunningWinPL = previousSelections.reduce(
+        (sum, s) => sum + (s.winPL || 0),
+        0
+      );
+
+      let currentRunningPlacePL = null;
+      const previousPlacePL = previousSelections
+        .filter((s) => s.placePL !== null && s.placePL !== undefined)
+        .reduce((sum, s) => sum + (s.placePL || 0), 0);
+
+      if (previousPlacePL > 0 || deletedPlacePL !== null) {
+        currentRunningPlacePL = previousPlacePL;
+      }
+
+      // Update each subsequent selection's running totals
+      for (const subsequent of subsequentSelections) {
+        // Add this selection's PL to the running totals
+        if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
+          currentRunningWinPL += subsequent.winPL;
+        }
+        if (subsequent.placePL !== null && subsequent.placePL !== undefined) {
+          if (currentRunningPlacePL === null) {
+            // If this is the first selection with placePL after deletion,
+            // calculate runningPlacePL from all previous selections with placePL
+            const allPreviousWithPlace = await SystemSelection.find({
+              systemId: selection.systemId,
+              rowOrder: { $lte: subsequent.rowOrder },
+              placePL: { $ne: null },
+            })
+              .sort({ rowOrder: 1 })
+              .select("placePL");
+            currentRunningPlacePL = allPreviousWithPlace.reduce(
+              (sum, s) => sum + (s.placePL || 0),
+              0
+            );
+          } else {
+            currentRunningPlacePL += subsequent.placePL;
+          }
+        }
+
+        // Update the subsequent selection
+        const updateSubsequent = {
+          runningWinPL: currentRunningWinPL,
+        };
+        if (currentRunningPlacePL !== null) {
+          updateSubsequent.runningPlacePL = currentRunningPlacePL;
+        }
+
+        await SystemSelection.findByIdAndUpdate(
+          subsequent._id,
+          updateSubsequent
+        );
+      }
     }
 
     res.status(200).json({
@@ -536,6 +736,170 @@ const markSelectionsViewed = async (req, res) => {
   }
 };
 
+// @desc    Update selection results
+// @route   PUT /api/selections/:id/results
+// @access  Admin
+const updateSelectionResults = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { result, winBsp, placeBsp } = req.body;
+
+    // Find the selection
+    const selection = await SystemSelection.findById(id);
+    if (!selection) {
+      return res.status(404).json({
+        success: false,
+        error: "Selection not found",
+      });
+    }
+
+    // Validate required fields
+    if (!result || winBsp === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: "result and winBsp are required",
+      });
+    }
+
+    // Calculate winPL
+    const winPL = calculateWinPL(result, winBsp);
+
+    // Calculate placePL if placeBsp is provided
+    let placePL = null;
+    if (placeBsp !== undefined && placeBsp !== null) {
+      placePL = calculatePlacePL(result, placeBsp);
+    } else if (result.toUpperCase() === "LOST") {
+      // For LOST without placeBsp, still calculate placePL as 0.98
+      placePL = 0.98;
+    }
+
+    // Get all previous selections for this system (sorted by rowOrder)
+    // to calculate running totals
+    const previousSelections = await SystemSelection.find({
+      systemId: selection.systemId,
+      rowOrder: { $lte: selection.rowOrder || 0 },
+      _id: { $ne: id }, // Exclude current selection
+    })
+      .sort({ rowOrder: 1 })
+      .select("winPL placePL");
+
+    // Calculate runningWinPL from previous selections
+    // Sum all winPL from selections that come before this one (by rowOrder)
+    let runningWinPL = previousSelections.reduce(
+      (sum, s) => sum + (s.winPL || 0),
+      0
+    );
+    runningWinPL += winPL; // Add current selection's winPL
+
+    // Calculate runningPlacePL from previous selections
+    let runningPlacePL = null;
+    if (placePL !== null) {
+      runningPlacePL = previousSelections.reduce(
+        (sum, s) => sum + (s.placePL || 0),
+        0
+      );
+      runningPlacePL += placePL; // Add current selection's placePL
+    }
+
+    // Update the current selection first (so subsequent recalculations use updated values)
+    const updateData = {
+      result: result.toUpperCase(),
+      winBsp,
+      winPL,
+      runningWinPL,
+      hasResult: true,
+    };
+
+    if (placeBsp !== undefined) {
+      updateData.placeBsp = placeBsp;
+    }
+    if (placePL !== null) {
+      updateData.placePL = placePL;
+    }
+    if (runningPlacePL !== null) {
+      updateData.runningPlacePL = runningPlacePL;
+    }
+
+    const updatedSelection = await SystemSelection.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    )
+      .populate("systemId", "name slug")
+      .populate("createdBy", "firstName lastName email");
+
+    // Update all subsequent selections' running totals
+    // Get all selections after this one (by rowOrder)
+    const currentRowOrder = updatedSelection.rowOrder;
+
+    if (currentRowOrder !== null && currentRowOrder !== undefined) {
+      // Get all subsequent selections sorted by rowOrder
+      const subsequentSelections = await SystemSelection.find({
+        systemId: updatedSelection.systemId,
+        rowOrder: { $gt: currentRowOrder },
+      })
+        .sort({ rowOrder: 1 })
+        .select("_id winPL placePL");
+
+      // Recalculate running totals for subsequent selections incrementally
+      // Start with the current selection's running totals
+      let currentRunningWinPL = runningWinPL;
+      let currentRunningPlacePL = runningPlacePL;
+
+      // Update each subsequent selection's running totals
+      for (const subsequent of subsequentSelections) {
+        // Add this selection's PL to the running totals
+        if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
+          currentRunningWinPL += subsequent.winPL;
+        }
+        if (subsequent.placePL !== null && subsequent.placePL !== undefined) {
+          if (currentRunningPlacePL === null) {
+            // If this is the first selection with placePL after our update,
+            // calculate runningPlacePL from all previous selections with placePL
+            // (this will include the current selection we just updated)
+            const allPreviousWithPlace = await SystemSelection.find({
+              systemId: updatedSelection.systemId,
+              rowOrder: { $lte: subsequent.rowOrder },
+              placePL: { $ne: null },
+            })
+              .sort({ rowOrder: 1 })
+              .select("placePL");
+            currentRunningPlacePL = allPreviousWithPlace.reduce(
+              (sum, s) => sum + (s.placePL || 0),
+              0
+            );
+          } else {
+            currentRunningPlacePL += subsequent.placePL;
+          }
+        }
+
+        // Update the subsequent selection
+        const updateSubsequent = {
+          runningWinPL: currentRunningWinPL,
+        };
+        if (currentRunningPlacePL !== null) {
+          updateSubsequent.runningPlacePL = currentRunningPlacePL;
+        }
+
+        await SystemSelection.findByIdAndUpdate(
+          subsequent._id,
+          updateSubsequent
+        );
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: updatedSelection,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
 // @desc    Delete selections by date range or system
 // @route   DELETE /api/selections
 // @access  Admin
@@ -583,6 +947,7 @@ module.exports = {
   createSelection,
   createBulkSelections,
   updateSelection,
+  updateSelectionResults,
   deleteSelection,
   markSelectionsViewed,
   deleteSelections,

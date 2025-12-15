@@ -117,3 +117,5 @@ service-account-key.json
 *-key.json
 *.json.key
 
+# Historical data CSV files
+system-historical-data/*.csv

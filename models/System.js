@@ -3,8 +3,8 @@ const { Schema, model } = mongoose;
 
 const googleSheetConfigSchema = new Schema(
   {
-    spreadsheetId: { type: String, required: true },
-    range: { type: String, required: true },
+    spreadsheetId: { type: String, required: false },
+    range: { type: String, required: false },
   },
   { _id: false }
 );
@@ -17,12 +17,11 @@ const systemSchema = new Schema(
     isActive: { type: Boolean, default: true },
 
     sheets: {
-      selections: { type: googleSheetConfigSchema, required: true },
-      results: { type: googleSheetConfigSchema, required: true },
+      selections: { type: googleSheetConfigSchema, required: false },
+      results: { type: googleSheetConfigSchema, required: false },
     },
   },
   { timestamps: true }
 );
 
 module.exports = model("System", systemSchema);
-

@@ -8,6 +8,7 @@ const {
   createSelection,
   createBulkSelections,
   updateSelection,
+  updateSelectionResults,
   deleteSelection,
   markSelectionsViewed,
   deleteSelections,
@@ -17,13 +18,14 @@ const {
 router.route("/").get(auth, getSelections);
 router.route("/today").get(auth, getTodaySelections);
 router.route("/mark-viewed").put(auth, markSelectionsViewed);
-router.route("/:id").get(auth, getSelection);
 
 // Admin routes (require authentication + admin role)
-// Note: Specific routes (like /bulk) must come before /:id routes
+// Note: Specific routes (like /bulk, /:id/results) must come before /:id routes
 router.route("/bulk").post(auth, admin, createBulkSelections);
 router.route("/").post(auth, admin, createSelection);
 router.route("/").delete(auth, admin, deleteSelections);
+router.route("/:id/results").put(auth, admin, updateSelectionResults);
+router.route("/:id").get(auth, getSelection);
 router.route("/:id").put(auth, admin, updateSelection);
 router.route("/:id").delete(auth, admin, deleteSelection);
 

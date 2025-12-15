@@ -20,6 +20,7 @@ const stripeWebhookController = require("./controllers/stripeWebhookController")
 const System = require("./models/System");
 const { syncAllSystems, syncSystemResults } = require("./services/syncService");
 const SystemResult = require("./models/SystemResult");
+const SystemSelection = require("./models/SystemSelection");
 
 const app = express();
 
@@ -103,63 +104,63 @@ const startServer = async () => {
     // Connect to database
     await connectDB();
 
-    // sync all systems
-    if (process.env.NODE_ENV === "production") {
-      await syncAllSystems();
-    }
+    // // sync all systems
+    // if (process.env.NODE_ENV === "production") {
+    //   await syncAllSystems();
+    // }
 
-    // await syncAllSystems();
+    // // await syncAllSystems();
 
-    // await syncSystemResults("6927079fe504d7070a1e2cb3");
+    // // await syncSystemResults("6927079fe504d7070a1e2cb3");
 
-    // one time function to deleta all system results
-    // await SystemResult.deleteMany({});
+    // // one time function to deleta all system results
+    // // await SystemResult.deleteMany({});
 
-    // Set up cron job to sync Google Sheets every 5 minutes
-    const cronTime =
-      process.env.NODE_ENV === "production" ? "*/5 * * * *" : "*/55 * * * *";
-    // Cron expression: "*/5 * * * *" means every 5 minutes
-    // Set scheduled: true to prevent overlapping executions
-    cron.schedule(
-      cronTime,
-      async () => {
-        // Skip if sync is already running
-        if (isSyncRunning) {
-          console.log("⏭️  Sync already in progress, skipping this execution");
-          return;
-        }
+    // // Set up cron job to sync Google Sheets every 5 minutes
+    // const cronTime =
+    //   process.env.NODE_ENV === "production" ? "*/5 * * * *" : "*/55 * * * *";
+    // // Cron expression: "*/5 * * * *" means every 5 minutes
+    // // Set scheduled: true to prevent overlapping executions
+    // cron.schedule(
+    //   cronTime,
+    //   async () => {
+    //     // Skip if sync is already running
+    //     if (isSyncRunning) {
+    //       console.log("⏭️  Sync already in progress, skipping this execution");
+    //       return;
+    //     }
 
-        isSyncRunning = true;
-        const startTime = Date.now();
+    //     isSyncRunning = true;
+    //     const startTime = Date.now();
 
-        console.log("🔄 Running scheduled sync from Google Sheets...");
-        try {
-          await syncAllSystems();
-          const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-          console.log(`✅ Sync completed in ${duration} seconds`);
-        } catch (error) {
-          console.error("❌ Error in scheduled sync:", error.message);
-        } finally {
-          isSyncRunning = false;
-        }
-      },
-      {
-        scheduled: true,
-        timezone: "UTC",
-      }
-    );
+    //     console.log("🔄 Running scheduled sync from Google Sheets...");
+    //     try {
+    //       await syncAllSystems();
+    //       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    //       console.log(`✅ Sync completed in ${duration} seconds`);
+    //     } catch (error) {
+    //       console.error("❌ Error in scheduled sync:", error.message);
+    //     } finally {
+    //       isSyncRunning = false;
+    //     }
+    //   },
+    //   {
+    //     scheduled: true,
+    //     timezone: "UTC",
+    //   }
+    // );
 
-    console.log("✅ Cron job scheduled: Google Sheets sync every 55 minutes");
+    // console.log("✅ Cron job scheduled: Google Sheets sync every 55 minutes");
 
-    // Run initial sync on server start (optional)
-    if (process.env.RUN_INITIAL_SYNC === "true") {
-      console.log("🔄 Running initial sync on server start...");
-      try {
-        await syncAllSystems();
-      } catch (error) {
-        console.error("❌ Error in initial sync:", error.message);
-      }
-    }
+    // // Run initial sync on server start (optional)
+    // if (process.env.RUN_INITIAL_SYNC === "true") {
+    //   console.log("🔄 Running initial sync on server start...");
+    //   try {
+    //     await syncAllSystems();
+    //   } catch (error) {
+    //     console.error("❌ Error in initial sync:", error.message);
+    //   }
+    // }
 
     const PORT = process.env.PORT || 5001;
 
@@ -207,3 +208,11 @@ startServer();
 // };
 
 // initializeSystem();
+
+// async function to find system selection with horse called Birdman Bob
+// (async () => {
+//   const selections = await SystemSelection.deleteOne({
+//     horse: "Avada Kedavra",
+//   });
+//   console.log("selections", selections);
+// })();

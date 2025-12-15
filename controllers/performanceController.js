@@ -1,5 +1,5 @@
 const System = require("../models/System");
-const SystemResult = require("../models/SystemResult");
+const SystemSelection = require("../models/SystemSelection");
 
 // @desc    Get all systems for dropdown
 // @route   GET /api/performance/systems
@@ -29,10 +29,11 @@ const getSystemPerformance = async (req, res) => {
   try {
     const { systemId } = req.params;
     const query = req.query;
-    // console.log("query in getSystemPerformance", query);
+    console.log("query in getSystemPerformance", query);
 
     // Verify system exists
     const system = await System.findById(systemId);
+    console.log("system", system);
     if (!system) {
       return res.status(404).json({
         success: false,
@@ -40,9 +41,9 @@ const getSystemPerformance = async (req, res) => {
       });
     }
 
-    // Build query
-    const dbQuery = { systemId };
-
+    // Build query - only get selections with results
+    const dbQuery = { systemId, hasResult: true };
+    console.log("dbQuery", dbQuery);
     // Date range filtering
     const { startDate, endDate } = query;
     if (startDate || endDate) {
@@ -59,7 +60,7 @@ const getSystemPerformance = async (req, res) => {
     }
 
     // Get all results for this system
-    const results = await SystemResult.find(dbQuery).sort({ date: 1 });
+    const results = await SystemSelection.find(dbQuery).sort({ date: 1 });
 
     if (!results.length) {
       return res.status(200).json({
@@ -113,6 +114,7 @@ const getSystemPerformance = async (req, res) => {
         profitByOddsRange,
       },
     };
+    console.log("toSend", JSON.stringify(toSend, null, 2));
 
     res.status(200).json(toSend);
   } catch (error) {
@@ -189,6 +191,11 @@ function calculateProfitByOddsRange(results) {
 
   return ranges.map((range) => {
     const rangeResults = results.filter((r) => {
+      // For "All Odds", include all results (even without winBsp)
+      if (range.max === Infinity) {
+        return true;
+      }
+      // For other ranges, only include results with winBsp
       if (!r.winBsp) return false;
       return r.winBsp <= range.max;
     });
@@ -199,9 +206,14 @@ function calculateProfitByOddsRange(results) {
       (r) => r.result && r.result.toUpperCase().includes("LOST")
     ).length;
 
-    // Calculate average odds (sum of odds / count of bets)
-    const sumOdds = rangeResults.reduce((sum, r) => sum + (r.winBsp || 0), 0);
-    const avgOdds = bets > 0 ? sumOdds / bets : 0;
+    // Calculate average odds (only count results with winBsp to avoid skewing)
+    const resultsWithOdds = rangeResults.filter((r) => r.winBsp);
+    const sumOdds = resultsWithOdds.reduce(
+      (sum, r) => sum + (r.winBsp || 0),
+      0
+    );
+    const avgOdds =
+      resultsWithOdds.length > 0 ? sumOdds / resultsWithOdds.length : 0;
 
     const toSend = {
       range: range.label,
@@ -229,8 +241,11 @@ const getAllSystemsWithStats = async (req, res) => {
     // Calculate stats for each system
     const systemsWithStats = await Promise.all(
       systems.map(async (system) => {
-        // Get all results for this system
-        const results = await SystemResult.find({ systemId: system._id });
+        // Get all results for this system (only selections with results)
+        const results = await SystemSelection.find({
+          systemId: system._id,
+          hasResult: true,
+        });
 
         // Calculate stats
         const totalBets = results.length;
@@ -249,7 +264,7 @@ const getAllSystemsWithStats = async (req, res) => {
         const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
         // console.log("roi", roi);
 
-        return {
+        const toSend = {
           systemId: system._id,
           systemName: system.name,
           systemSlug: system.slug,
@@ -259,6 +274,9 @@ const getAllSystemsWithStats = async (req, res) => {
           roi,
           totalBets,
         };
+        console.log("toSend", toSend);
+
+        return toSend;
       })
     );
 
@@ -291,8 +309,8 @@ const getSystemResults = async (req, res) => {
       });
     }
 
-    // Build query
-    const query = { systemId };
+    // Build query - only get selections with results
+    const query = { systemId, hasResult: true };
 
     // Date range filtering
     if (startDate || endDate) {
@@ -321,10 +339,10 @@ const getSystemResults = async (req, res) => {
     // console.log("query", query);
     // console.log("sortObj", sortObj);
     // Get total count
-    const total = await SystemResult.countDocuments(query);
+    const total = await SystemSelection.countDocuments(query);
 
     // Get results with pagination
-    const results = await SystemResult.find(query)
+    const results = await SystemSelection.find(query)
       .sort(sortObj)
       .skip(offsetNum)
       .limit(limitNum);
@@ -389,8 +407,8 @@ const getMonthlyBreakdown = async (req, res) => {
       });
     }
 
-    // Build query
-    const query = { systemId };
+    // Build query - only get selections with results
+    const query = { systemId, hasResult: true };
 
     // Date range filtering
     if (startDate || endDate) {
@@ -406,7 +424,7 @@ const getMonthlyBreakdown = async (req, res) => {
     }
 
     // Get all results for this system
-    const results = await SystemResult.find(query).sort({ date: 1 });
+    const results = await SystemSelection.find(query).sort({ date: 1 });
 
     // Group by month and calculate monthly P/L (non-cumulative)
     const monthlyData = {};
