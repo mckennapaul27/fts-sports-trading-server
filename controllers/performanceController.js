@@ -13,7 +13,11 @@ function parseNumberOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function applyCommonFilters(dbQuery, query) {
+function applyCommonFilters(
+  dbQuery,
+  query,
+  { includeCountry = true, includeMeeting = true, includeOdds = true } = {}
+) {
   // Date range filtering
   const startDate = query.startDate;
   const endDate = query.endDate;
@@ -31,24 +35,30 @@ function applyCommonFilters(dbQuery, query) {
   }
 
   // Country filtering
-  const country = normalizeString(query.country);
-  if (country && country.toLowerCase() !== "all") {
-    dbQuery.country = country;
+  if (includeCountry) {
+    const country = normalizeString(query.country);
+    if (country && country.toLowerCase() !== "all") {
+      dbQuery.country = country;
+    }
   }
 
   // Meeting filtering (support either `meeting` or `course` query param)
-  const meeting = normalizeString(query.meeting || query.course);
-  if (meeting && meeting.toLowerCase() !== "all") {
-    dbQuery.meeting = meeting;
+  if (includeMeeting) {
+    const meeting = normalizeString(query.meeting || query.course);
+    if (meeting && meeting.toLowerCase() !== "all") {
+      dbQuery.meeting = meeting;
+    }
   }
 
   // Odds filtering (winBsp is the odds field)
-  const minOdds = parseNumberOrNull(query.minOdds);
-  const maxOdds = parseNumberOrNull(query.maxOdds);
-  if (minOdds !== null || maxOdds !== null) {
-    dbQuery.winBsp = {};
-    if (minOdds !== null) dbQuery.winBsp.$gte = minOdds;
-    if (maxOdds !== null) dbQuery.winBsp.$lte = maxOdds;
+  if (includeOdds) {
+    const minOdds = parseNumberOrNull(query.minOdds);
+    const maxOdds = parseNumberOrNull(query.maxOdds);
+    if (minOdds !== null || maxOdds !== null) {
+      dbQuery.winBsp = {};
+      if (minOdds !== null) dbQuery.winBsp.$gte = minOdds;
+      if (maxOdds !== null) dbQuery.winBsp.$lte = maxOdds;
+    }
   }
 }
 
@@ -503,10 +513,71 @@ const getMonthlyBreakdown = async (req, res) => {
   }
 };
 
+// @desc    Get distinct filter options for a system
+// @route   GET /api/performance/filters/:systemId
+// @access  Public
+//
+// Notes:
+// - Applies date/odds filters (startDate/endDate/minOdds/maxOdds) so dropdowns stay relevant.
+// - Does NOT apply country/meeting filters when building the distinct sets.
+const getSystemFilterOptions = async (req, res) => {
+  try {
+    const { systemId } = req.params;
+
+    // Verify system exists
+    const system = await System.findById(systemId);
+    if (!system) {
+      return res.status(404).json({
+        success: false,
+        error: "System not found",
+      });
+    }
+
+    const query = { systemId, hasResult: true };
+    applyCommonFilters(query, req.query, {
+      includeCountry: false,
+      includeMeeting: false,
+      includeOdds: true,
+    });
+
+    const [countriesRaw, meetingsRaw] = await Promise.all([
+      SystemSelection.distinct("country", query),
+      SystemSelection.distinct("meeting", query),
+    ]);
+
+    const countries = (countriesRaw || [])
+      .map((v) => normalizeString(v))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    const meetings = (meetingsRaw || [])
+      .map((v) => normalizeString(v))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        systemId,
+        systemName: system.name,
+        systemSlug: system.slug,
+        countries,
+        meetings,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getSystems,
   getSystemPerformance,
   getAllSystemsWithStats,
   getSystemResults,
   getMonthlyBreakdown,
+  getSystemFilterOptions,
 };
