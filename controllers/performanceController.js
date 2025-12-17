@@ -1,6 +1,57 @@
 const System = require("../models/System");
 const SystemSelection = require("../models/SystemSelection");
 
+function normalizeString(v) {
+  if (v === undefined || v === null) return "";
+  return String(v).trim();
+}
+
+function parseNumberOrNull(v) {
+  const s = normalizeString(v);
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function applyCommonFilters(dbQuery, query) {
+  // Date range filtering
+  const startDate = query.startDate;
+  const endDate = query.endDate;
+  if (startDate || endDate) {
+    dbQuery.date = {};
+    if (startDate) {
+      dbQuery.date.$gte = new Date(startDate);
+    }
+    if (endDate) {
+      // Set to end of day
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      dbQuery.date.$lte = end;
+    }
+  }
+
+  // Country filtering
+  const country = normalizeString(query.country);
+  if (country && country.toLowerCase() !== "all") {
+    dbQuery.country = country;
+  }
+
+  // Meeting filtering (support either `meeting` or `course` query param)
+  const meeting = normalizeString(query.meeting || query.course);
+  if (meeting && meeting.toLowerCase() !== "all") {
+    dbQuery.meeting = meeting;
+  }
+
+  // Odds filtering (winBsp is the odds field)
+  const minOdds = parseNumberOrNull(query.minOdds);
+  const maxOdds = parseNumberOrNull(query.maxOdds);
+  if (minOdds !== null || maxOdds !== null) {
+    dbQuery.winBsp = {};
+    if (minOdds !== null) dbQuery.winBsp.$gte = minOdds;
+    if (maxOdds !== null) dbQuery.winBsp.$lte = maxOdds;
+  }
+}
+
 // @desc    Get all systems for dropdown
 // @route   GET /api/performance/systems
 // @access  Public
@@ -43,21 +94,8 @@ const getSystemPerformance = async (req, res) => {
 
     // Build query - only get selections with results
     const dbQuery = { systemId, hasResult: true };
+    applyCommonFilters(dbQuery, query);
     console.log("dbQuery", dbQuery);
-    // Date range filtering
-    const { startDate, endDate } = query;
-    if (startDate || endDate) {
-      dbQuery.date = {};
-      if (startDate) {
-        dbQuery.date.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        // Set to end of day
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        dbQuery.date.$lte = end;
-      }
-    }
 
     // Get all results for this system
     const results = await SystemSelection.find(dbQuery).sort({ date: 1 });
@@ -298,7 +336,7 @@ const getAllSystemsWithStats = async (req, res) => {
 const getSystemResults = async (req, res) => {
   try {
     const { systemId } = req.params;
-    const { limit = 20, offset = 0, startDate, endDate } = req.query;
+    const { limit = 20, offset = 0 } = req.query;
 
     // Verify system exists
     const system = await System.findById(systemId);
@@ -311,20 +349,7 @@ const getSystemResults = async (req, res) => {
 
     // Build query - only get selections with results
     const query = { systemId, hasResult: true };
-
-    // Date range filtering
-    if (startDate || endDate) {
-      query.date = {};
-      if (startDate) {
-        query.date.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        // Set to end of day
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        query.date.$lte = end;
-      }
-    }
+    applyCommonFilters(query, req.query);
 
     // Parse limit and offset
     const limitNum = parseInt(limit, 10);
@@ -396,7 +421,6 @@ const getSystemResults = async (req, res) => {
 const getMonthlyBreakdown = async (req, res) => {
   try {
     const { systemId } = req.params;
-    const { startDate, endDate } = req.query;
 
     // Verify system exists
     const system = await System.findById(systemId);
@@ -409,19 +433,7 @@ const getMonthlyBreakdown = async (req, res) => {
 
     // Build query - only get selections with results
     const query = { systemId, hasResult: true };
-
-    // Date range filtering
-    if (startDate || endDate) {
-      query.date = {};
-      if (startDate) {
-        query.date.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        query.date.$lte = end;
-      }
-    }
+    applyCommonFilters(query, req.query);
 
     // Get all results for this system
     const results = await SystemSelection.find(query).sort({ date: 1 });
