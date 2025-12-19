@@ -90,11 +90,11 @@ const getSystemPerformance = async (req, res) => {
   try {
     const { systemId } = req.params;
     const query = req.query;
-    console.log("query in getSystemPerformance", query);
+    // console.log("query in getSystemPerformance", query);
 
     // Verify system exists
     const system = await System.findById(systemId);
-    console.log("system", system);
+    // console.log("system", system);
     if (!system) {
       return res.status(404).json({
         success: false,
@@ -105,10 +105,13 @@ const getSystemPerformance = async (req, res) => {
     // Build query - only get selections with results
     const dbQuery = { systemId, hasResult: true };
     applyCommonFilters(dbQuery, query);
-    console.log("dbQuery", dbQuery);
+    // console.log("dbQuery", dbQuery);
 
-    // Get all results for this system
-    const results = await SystemSelection.find(dbQuery).sort({ date: 1 });
+    // Get only the fields we need and use lean() for plain JS objects (saves memory)
+    const results = await SystemSelection.find(dbQuery)
+      .select("date winPL result winBsp")
+      .sort({ date: 1 })
+      .lean();
 
     if (!results.length) {
       return res.status(200).json({
@@ -127,19 +130,20 @@ const getSystemPerformance = async (req, res) => {
       });
     }
 
-    // Calculate basic stats
+    // Calculate basic stats in a single pass
+    let totalPL = 0;
+    let wins = 0;
     const totalBets = results.length;
-    const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
 
-    // console.log("totalPL", totalPL);
+    for (const r of results) {
+      const pl = r.winPL || 0;
+      totalPL += pl;
+      if (r.result && r.result.toUpperCase().includes("LOST")) {
+        wins++;
+      }
+    }
 
-    // Calculate strike rate (wins / total bets)
-    const wins = results.filter(
-      (r) => r.result && r.result.toUpperCase().includes("LOST")
-    ).length;
     const strikeRate = totalBets > 0 ? (wins / totalBets) * 100 : 0;
-
-    // Calculate ROI (assuming 1pt level stakes, ROI = totalPL / totalBets * 100)
     const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
 
     // Calculate monthly cumulative P/L
@@ -162,7 +166,7 @@ const getSystemPerformance = async (req, res) => {
         profitByOddsRange,
       },
     };
-    console.log("toSend", JSON.stringify(toSend, null, 2));
+    // console.log("toSend", JSON.stringify(toSend, null, 2));
 
     res.status(200).json(toSend);
   } catch (error) {
@@ -181,8 +185,8 @@ function calculateMonthlyCumulative(results) {
   // Group by year-month
   const monthlyData = {};
 
-  results.forEach((result) => {
-    if (!result.date) return;
+  for (const result of results) {
+    if (!result.date) continue;
 
     const date = new Date(result.date);
     const yearMonth = `${date.getFullYear()}-${String(
@@ -203,7 +207,7 @@ function calculateMonthlyCumulative(results) {
 
     monthlyData[yearMonth].pl += result.winPL || 0;
     monthlyData[yearMonth].bets += 1;
-  });
+  }
 
   // Convert to array and calculate cumulative
   const monthlyArray = Object.values(monthlyData).sort((a, b) =>
@@ -235,46 +239,64 @@ function calculateProfitByOddsRange(results) {
     { label: "All Odds", max: Infinity },
   ];
 
-  // console.log("ranges", ranges);
+  // Pre-calculate stats for each range in a single pass
+  const rangeStats = ranges.map(() => ({
+    profit: 0,
+    bets: 0,
+    wins: 0,
+    sumOdds: 0,
+    oddsCount: 0,
+  }));
 
-  return ranges.map((range) => {
-    const rangeResults = results.filter((r) => {
-      // For "All Odds", include all results (even without winBsp)
+  // Single pass through results
+  for (const r of results) {
+    const pl = r.winPL || 0;
+    const isWin = r.result && r.result.toUpperCase().includes("LOST");
+    const odds = r.winBsp;
+
+    // Process each range
+    for (let i = 0; i < ranges.length; i++) {
+      const range = ranges[i];
+      let include = false;
+
       if (range.max === Infinity) {
-        return true;
+        include = true; // "All Odds" includes everything
+      } else if (odds && odds <= range.max) {
+        include = true;
       }
-      // For other ranges, only include results with winBsp
-      if (!r.winBsp) return false;
-      return r.winBsp <= range.max;
-    });
 
-    const profit = rangeResults.reduce((sum, r) => sum + (r.winPL || 0), 0);
-    const bets = rangeResults.length;
-    const wins = rangeResults.filter(
-      (r) => r.result && r.result.toUpperCase().includes("LOST")
-    ).length;
+      if (include) {
+        rangeStats[i].profit += pl;
+        rangeStats[i].bets += 1;
+        if (isWin) {
+          rangeStats[i].wins += 1;
+        }
+        if (odds) {
+          rangeStats[i].sumOdds += odds;
+          rangeStats[i].oddsCount += 1;
+        }
+      }
+    }
+  }
 
-    // Calculate average odds (only count results with winBsp to avoid skewing)
-    const resultsWithOdds = rangeResults.filter((r) => r.winBsp);
-    const sumOdds = resultsWithOdds.reduce(
-      (sum, r) => sum + (r.winBsp || 0),
-      0
-    );
-    const avgOdds =
-      resultsWithOdds.length > 0 ? sumOdds / resultsWithOdds.length : 0;
+  // Build response
+  return ranges.map((range, i) => {
+    const stats = rangeStats[i];
+    const avgOdds = stats.oddsCount > 0 ? stats.sumOdds / stats.oddsCount : 0;
 
-    const toSend = {
+    return {
       range: range.label,
       minOdds: 1.0, // All ranges start from 1.0 (minimum betting odds)
       maxOdds: range.max === Infinity ? null : range.max,
-      profit: Math.round(profit * 100) / 100,
-      bets,
-      wins,
-      strikeRate: bets > 0 ? Math.round((wins / bets) * 100 * 10) / 10 : 0,
+      profit: Math.round(stats.profit * 100) / 100,
+      bets: stats.bets,
+      wins: stats.wins,
+      strikeRate:
+        stats.bets > 0
+          ? Math.round((stats.wins / stats.bets) * 100 * 10) / 10
+          : 0,
       avgOdds: Math.round(avgOdds * 100) / 100, // Round to 2 decimal places
     };
-
-    return toSend;
   });
 }
 
@@ -286,31 +308,56 @@ const getAllSystemsWithStats = async (req, res) => {
     // Get all active systems
     const systems = await System.find({ isActive: true }).sort({ name: 1 });
 
-    // Calculate stats for each system
+    // Calculate stats for each system using aggregation pipeline (much more memory efficient)
     const systemsWithStats = await Promise.all(
       systems.map(async (system) => {
-        // Get all results for this system (only selections with results)
-        const results = await SystemSelection.find({
-          systemId: system._id,
-          hasResult: true,
-        });
+        // Use aggregation pipeline to calculate stats in database (avoids loading all data)
+        const stats = await SystemSelection.aggregate([
+          {
+            $match: {
+              systemId: system._id,
+              hasResult: true,
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              totalBets: { $sum: 1 },
+              totalPL: { $sum: { $ifNull: ["$winPL", 0] } },
+              wins: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $ne: ["$result", null] },
+                        {
+                          $regexMatch: {
+                            input: "$result",
+                            regex: /LOST/i,
+                          },
+                        },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ]);
 
-        // Calculate stats
-        const totalBets = results.length;
-        const totalPL = results.reduce((sum, r) => sum + (r.winPL || 0), 0);
+        const statsData = stats[0] || {
+          totalBets: 0,
+          totalPL: 0,
+          wins: 0,
+        };
 
-        // console.log("totalBets", totalBets);
-        // console.log("totalPL", totalPL);
-
-        // Calculate strike rate (for lay bets, "LOST" = win)
-        const wins = results.filter(
-          (r) => r.result && r.result.toUpperCase().includes("LOST")
-        ).length;
+        const totalBets = statsData.totalBets;
+        const totalPL = statsData.totalPL;
+        const wins = statsData.wins;
         const strikeRate = totalBets > 0 ? (wins / totalBets) * 100 : 0;
-
-        // Calculate ROI (assuming 1pt level stakes, ROI = totalPL / totalBets * 100)
         const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
-        // console.log("roi", roi);
 
         const toSend = {
           systemId: system._id,
@@ -322,7 +369,7 @@ const getAllSystemsWithStats = async (req, res) => {
           roi,
           totalBets,
         };
-        console.log("toSend", toSend);
+        // console.log("toSend", toSend);
 
         return toSend;
       })
@@ -376,11 +423,15 @@ const getSystemResults = async (req, res) => {
     // Get total count
     const total = await SystemSelection.countDocuments(query);
 
-    // Get results with pagination
+    // Get results with pagination - only select fields we need and use lean() for memory efficiency
     const results = await SystemSelection.find(query)
+      .select(
+        "dateISO country meeting time horse result winBsp winPL runningWinPL"
+      )
       .sort(sortObj)
       .skip(offsetNum)
-      .limit(limitNum);
+      .limit(limitNum)
+      .lean();
 
     // Map to response format
     const mappedResults = results.map((result) => {
@@ -445,14 +496,17 @@ const getMonthlyBreakdown = async (req, res) => {
     const query = { systemId, hasResult: true };
     applyCommonFilters(query, req.query);
 
-    // Get all results for this system
-    const results = await SystemSelection.find(query).sort({ date: 1 });
+    // Get only the fields we need and use lean() for plain JS objects (saves memory)
+    const results = await SystemSelection.find(query)
+      .select("date winPL result")
+      .sort({ date: 1 })
+      .lean();
 
     // Group by month and calculate monthly P/L (non-cumulative)
     const monthlyData = {};
 
-    results.forEach((result) => {
-      if (!result.date) return;
+    for (const result of results) {
+      if (!result.date) continue;
 
       const date = new Date(result.date);
       const yearMonth = `${date.getFullYear()}-${String(
@@ -479,7 +533,7 @@ const getMonthlyBreakdown = async (req, res) => {
       if (result.result && result.result.toUpperCase().includes("LOST")) {
         monthlyData[yearMonth].wins += 1;
       }
-    });
+    }
 
     // Convert to array and calculate strike rate
     const monthlyArray = Object.values(monthlyData)
