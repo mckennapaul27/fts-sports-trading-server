@@ -365,6 +365,484 @@ const createSelection = async (req, res) => {
   }
 };
 
+// @desc    Upload results from CSV
+// @route   POST /api/selections/upload-results-csv
+// @access  Admin
+const uploadResultsFromCSV = async (req, res) => {
+  try {
+    // Get CSV file from multer (req.file)
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: "CSV file is required",
+      });
+    }
+
+    // Read CSV file content
+    const csvText = req.file.buffer.toString("utf-8");
+
+    // Parse CSV
+    const lines = csvText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line);
+    if (lines.length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: "CSV must contain at least a header row and one data row",
+      });
+    }
+
+    // Parse header
+    const header = lines[0].split(",").map((h) => h.trim());
+    const dateOfRaceIdx = header.indexOf("Date of Race");
+    const countryIdx = header.indexOf("Country");
+    const trackIdx = header.indexOf("Track");
+    const timeIdx = header.indexOf("Time");
+    const horseIdx = header.indexOf("Horse");
+    const betfairSPIdx = header.indexOf("Betfair SP");
+    const betfairLayReturnIdx = header.indexOf("Betfair Lay Return");
+    const betfairPlaceSPIdx = header.indexOf("Betfair Place SP");
+    const placeLayReturnIdx = header.indexOf("Place Lay Return");
+
+    if (
+      dateOfRaceIdx === -1 ||
+      countryIdx === -1 ||
+      trackIdx === -1 ||
+      timeIdx === -1 ||
+      horseIdx === -1 ||
+      betfairSPIdx === -1 ||
+      betfairLayReturnIdx === -1 ||
+      betfairPlaceSPIdx === -1 ||
+      placeLayReturnIdx === -1
+    ) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "CSV must contain 'Date of Race', 'Country', 'Track', 'Time', 'Horse', 'Betfair SP', 'Betfair Lay Return', 'Betfair Place SP', and 'Place Lay Return' columns",
+      });
+    }
+
+    const updatedSelections = [];
+    const unmatchedRows = [];
+    const errors = [];
+
+    // Process each row
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        const values = lines[i].split(",").map((v) => v.trim());
+
+        const dateOfRace = values[dateOfRaceIdx];
+        const country = values[countryIdx];
+        const track = values[trackIdx];
+        const time = values[timeIdx];
+        const horse = values[horseIdx];
+        const betfairSPStr = values[betfairSPIdx];
+        const betfairLayReturnStr = values[betfairLayReturnIdx];
+        const betfairPlaceSPStr = values[betfairPlaceSPIdx];
+        const placeLayReturnStr = values[placeLayReturnIdx];
+
+        if (!dateOfRace || !time || !horse) {
+          errors.push({
+            row: i + 1,
+            error: "Date of Race, Time, and Horse are required",
+          });
+          continue;
+        }
+
+        // Convert date to ISO format
+        const dateISO = ukToIso(dateOfRace);
+        if (!dateISO) {
+          errors.push({
+            row: i + 1,
+            error: `Invalid date format: ${dateOfRace}. Expected "DD/MM/YYYY"`,
+          });
+          continue;
+        }
+
+        // Find matching selection by dateISO, time, and horse across ALL systems
+        const selection = await SystemSelection.findOne({
+          dateISO,
+          time,
+          horse,
+        });
+
+        if (!selection) {
+          unmatchedRows.push({
+            row: i + 1,
+            date: dateOfRace,
+            time,
+            horse,
+            reason:
+              "No matching selection found with this date, time, and horse",
+          });
+          continue;
+        }
+
+        // Parse numeric values
+        const betfairSP =
+          betfairSPStr && betfairSPStr.trim() ? parseFloat(betfairSPStr) : null;
+        const betfairLayReturn = betfairLayReturnStr
+          ? parseFloat(betfairLayReturnStr)
+          : null;
+        const betfairPlaceSP =
+          betfairPlaceSPStr && betfairPlaceSPStr.trim()
+            ? parseFloat(betfairPlaceSPStr)
+            : null;
+        const placeLayReturn = placeLayReturnStr
+          ? parseFloat(placeLayReturnStr)
+          : null;
+
+        // Check if Betfair SP is empty/invalid - if so, result is VOID
+        const hasValidBetfairSP =
+          betfairSP !== null && !isNaN(betfairSP) && betfairSP > 0;
+        const hasValidBetfairPlaceSP =
+          betfairPlaceSP !== null &&
+          !isNaN(betfairPlaceSP) &&
+          betfairPlaceSP > 0;
+
+        let result;
+        let winPL = null;
+        let placePL = null;
+
+        // Edge case 1: If Betfair SP is empty, result is VOID
+        // Note: If Betfair SP is empty, Betfair Place SP will ALWAYS be empty too
+        // For VOID, both winPL and placePL are 0
+        if (!hasValidBetfairSP) {
+          result = "VOID";
+          winPL = 0;
+          placePL = 0; // Set to 0 for VOID (Place SP will also be empty)
+        } else {
+          // Determine result based on lay returns (only if we have valid Betfair SP)
+          // If Betfair Lay Return < 0: WON (lay bet lost)
+          // If Place Lay Return < 0 (but win lay return >= 0): PLACED
+          // If both >= 0: LOST
+          if (betfairLayReturn !== null && betfairLayReturn < 0) {
+            result = "WON";
+          } else if (placeLayReturn !== null && placeLayReturn < 0) {
+            result = "PLACED";
+          } else {
+            result = "LOST";
+          }
+
+          // Calculate winPL using the same logic as migration scripts
+          winPL = calculateWinPL(result, betfairSP);
+
+          // Edge case 2: Only process place market if Betfair Place SP exists
+          // If no Betfair Place SP, placePL remains null (place market not processed)
+          if (hasValidBetfairPlaceSP) {
+            placePL = calculatePlacePL(result, betfairPlaceSP);
+          }
+          // Otherwise placePL remains null (place market not processed)
+        }
+
+        // Get all previous selections to calculate running totals
+        const previousSelections = await SystemSelection.find({
+          systemId: selection.systemId,
+          rowOrder: { $lt: selection.rowOrder || 0 },
+        })
+          .sort({ rowOrder: 1 })
+          .select("winPL placePL");
+
+        // Calculate runningWinPL
+        let runningWinPL = previousSelections.reduce(
+          (sum, s) => sum + (s.winPL || 0),
+          0
+        );
+        // winPL is always set (0 for VOID, or calculated value)
+        runningWinPL += winPL;
+
+        // Calculate runningPlacePL
+        // For VOID cases, placePL is 0, so we still calculate runningPlacePL
+        // For cases without place SP, placePL is null, so we don't update runningPlacePL
+        let runningPlacePL = null;
+        if (placePL !== null) {
+          runningPlacePL = previousSelections.reduce(
+            (sum, s) => sum + (s.placePL || 0),
+            0
+          );
+          runningPlacePL += placePL;
+        }
+
+        // Update the selection
+        const updateData = {
+          country: country || selection.country,
+          meeting: track || selection.meeting,
+          result: result.toUpperCase(),
+          hasResult: true,
+        };
+
+        // Only set winBsp if Betfair SP is valid (not VOID case)
+        if (hasValidBetfairSP) {
+          updateData.winBsp = betfairSP;
+        }
+        // Always set winPL (will be 0 for VOID, or calculated value otherwise)
+        updateData.winPL = winPL;
+        updateData.runningWinPL = runningWinPL;
+
+        // Only set placeBsp and placePL if Betfair Place SP exists
+        if (hasValidBetfairPlaceSP) {
+          updateData.placeBsp = betfairPlaceSP;
+        }
+        if (placePL !== null) {
+          updateData.placePL = placePL;
+          updateData.runningPlacePL = runningPlacePL;
+        }
+
+        const updatedSelection = await SystemSelection.findByIdAndUpdate(
+          selection._id,
+          updateData,
+          { new: true, runValidators: true }
+        );
+
+        updatedSelections.push(updatedSelection);
+
+        // Recalculate running totals for subsequent selections
+        const currentRowOrder = updatedSelection.rowOrder;
+        if (currentRowOrder !== null && currentRowOrder !== undefined) {
+          const subsequentSelections = await SystemSelection.find({
+            systemId: updatedSelection.systemId,
+            rowOrder: { $gt: currentRowOrder },
+          })
+            .sort({ rowOrder: 1 })
+            .select("_id winPL placePL");
+
+          let currentRunningWinPL = runningWinPL;
+          let currentRunningPlacePL = runningPlacePL;
+
+          for (const subsequent of subsequentSelections) {
+            if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
+              currentRunningWinPL += subsequent.winPL;
+            }
+            if (
+              subsequent.placePL !== null &&
+              subsequent.placePL !== undefined
+            ) {
+              if (currentRunningPlacePL === null) {
+                const allPreviousWithPlace = await SystemSelection.find({
+                  systemId: updatedSelection.systemId,
+                  rowOrder: { $lte: subsequent.rowOrder },
+                  placePL: { $ne: null },
+                })
+                  .sort({ rowOrder: 1 })
+                  .select("placePL");
+                currentRunningPlacePL = allPreviousWithPlace.reduce(
+                  (sum, s) => sum + (s.placePL || 0),
+                  0
+                );
+              } else {
+                currentRunningPlacePL += subsequent.placePL;
+              }
+            }
+
+            const updateSubsequent = {
+              runningWinPL: currentRunningWinPL,
+            };
+            if (currentRunningPlacePL !== null) {
+              updateSubsequent.runningPlacePL = currentRunningPlacePL;
+            }
+
+            await SystemSelection.findByIdAndUpdate(
+              subsequent._id,
+              updateSubsequent
+            );
+          }
+        }
+      } catch (error) {
+        errors.push({
+          row: i + 1,
+          error: error.message,
+        });
+      }
+    }
+
+    // Populate updated selections
+    const populatedSelections = await SystemSelection.find({
+      _id: { $in: updatedSelections.map((s) => s._id) },
+    })
+      .populate("systemId", "name slug")
+      .populate("createdBy", "firstName lastName email");
+
+    res.status(200).json({
+      success: true,
+      updated: populatedSelections.length,
+      unmatched: unmatchedRows.length > 0 ? unmatchedRows : undefined,
+      errors: errors.length > 0 ? errors : undefined,
+      data: populatedSelections,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Create selections from CSV upload
+// @route   POST /api/selections/upload-csv
+// @access  Admin
+const uploadSelectionsFromCSV = async (req, res) => {
+  try {
+    // Get systemId from form data (multer adds it to req.body)
+    const systemId = req.body.systemId;
+
+    // Validate required fields
+    if (!systemId) {
+      return res.status(400).json({
+        success: false,
+        error: "systemId is required",
+      });
+    }
+
+    // Get CSV file from multer (req.file)
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: "CSV file is required",
+      });
+    }
+
+    // Read CSV file content
+    const csvText = req.file.buffer.toString("utf-8");
+
+    // Verify system exists
+    const system = await System.findById(systemId);
+    if (!system) {
+      return res.status(404).json({
+        success: false,
+        error: "System not found",
+      });
+    }
+
+    console.log("csvText", csvText);
+    console.log("system", system);
+
+    // Parse CSV
+    const lines = csvText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line);
+    if (lines.length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: "CSV must contain at least a header row and one data row",
+      });
+    }
+
+    // Parse header
+    const header = lines[0].split(",").map((h) => h.trim());
+    const timeIdx = header.indexOf("Time");
+    const raceIdx = header.indexOf("Race");
+    const selectionIdx = header.indexOf("Selection");
+
+    if (timeIdx === -1 || raceIdx === -1 || selectionIdx === -1) {
+      return res.status(400).json({
+        success: false,
+        error: "CSV must contain 'Time', 'Race', and 'Selection' columns",
+      });
+    }
+
+    // Get the maximum rowOrder for this system
+    const lastSelection = await SystemSelection.findOne({ systemId })
+      .sort({ rowOrder: -1 })
+      .select("rowOrder");
+    let currentRowOrder =
+      lastSelection && lastSelection.rowOrder !== null
+        ? lastSelection.rowOrder
+        : 0;
+
+    const createdSelections = [];
+    const errors = [];
+
+    // Parse data rows
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        const values = lines[i].split(",").map((v) => v.trim());
+
+        const timeValue = values[timeIdx]; // Format: "DD/MM/YYYY HH:MM"
+        const raceValue = values[raceIdx]; // Format: "HH:MM MeetingAbbr"
+        const horse = values[selectionIdx];
+
+        if (!timeValue || !horse) {
+          errors.push({
+            row: i + 1,
+            error: "Time and Selection are required",
+          });
+          continue;
+        }
+
+        // Parse date and time from "DD/MM/YYYY HH:MM"
+        const [datePart, timePart] = timeValue.split(" ");
+        if (!datePart || !timePart) {
+          errors.push({
+            row: i + 1,
+            error: `Invalid time format: ${timeValue}. Expected "DD/MM/YYYY HH:MM"`,
+          });
+          continue;
+        }
+
+        // Convert date to ISO format
+        const dateISO = ukToIso(datePart);
+        if (!dateISO) {
+          errors.push({
+            row: i + 1,
+            error: `Invalid date format: ${datePart}. Expected "DD/MM/YYYY"`,
+          });
+          continue;
+        }
+
+        // Extract meeting from race column (format: "HH:MM MeetingAbbr")
+        // Remove the time prefix to get the meeting abbreviation
+        const meeting = raceValue
+          ? raceValue.replace(/^\d{1,2}:\d{2}\s*/, "").trim()
+          : null;
+
+        // Increment rowOrder
+        currentRowOrder += 1;
+
+        // Create selection
+        const selection = await SystemSelection.create({
+          systemId,
+          dateISO,
+          date: isoToDate(dateISO),
+          meeting: meeting || null,
+          time: timePart || null,
+          horse,
+          isNew: true,
+          createdBy: req.user.id,
+          rowOrder: currentRowOrder,
+        });
+
+        createdSelections.push(selection);
+      } catch (error) {
+        errors.push({
+          row: i + 1,
+          error: error.message,
+        });
+      }
+    }
+
+    // Populate created selections
+    const populatedSelections = await SystemSelection.find({
+      _id: { $in: createdSelections.map((s) => s._id) },
+    })
+      .populate("systemId", "name slug")
+      .populate("createdBy", "firstName lastName email");
+
+    res.status(201).json({
+      success: true,
+      created: populatedSelections.length,
+      errors: errors.length > 0 ? errors : undefined,
+      data: populatedSelections,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
 // @desc    Create multiple selections (bulk)
 // @route   POST /api/selections/bulk
 // @access  Admin
@@ -946,6 +1424,8 @@ module.exports = {
   getSelection,
   createSelection,
   createBulkSelections,
+  uploadSelectionsFromCSV,
+  uploadResultsFromCSV,
   updateSelection,
   updateSelectionResults,
   deleteSelection,

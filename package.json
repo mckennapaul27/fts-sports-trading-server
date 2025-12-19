@@ -25,6 +25,7 @@
     "googleapis": "^166.0.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.0.3",
+    "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "resend": "^6.5.2",
     "stripe": "^20.0.0"
