@@ -216,3 +216,13 @@ startServer();
 //   });
 //   console.log("selections", selections);
 // })();
+
+// ASYNC FUNCT TO FIND ALL SYSTEMSELECTIONS WITH DATEISO OF 2025-12-19
+// const findSystemSelectionsWithDateISO = async () => {
+//   const selections = await SystemSelection.deleteMany({
+//     dateISO: "2025-12-19",
+//   });
+//   console.log("selections", selections.length);
+// };
+
+// findSystemSelectionsWithDateISO();

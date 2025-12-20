@@ -424,10 +424,14 @@ const uploadResultsFromCSV = async (req, res) => {
     }
 
     const updatedSelections = [];
-    const unmatchedRows = [];
+    const unmatchedSelections = [];
     const errors = [];
 
-    // Process each row
+    // First pass: Parse CSV and build a map of CSV data by dateISO+time+horse
+    // Also collect all unique dateISO values
+    const csvDataMap = new Map(); // key: `${dateISO}|${time}|${horse}`, value: CSV row data
+    const dateISOs = new Set();
+
     for (let i = 1; i < lines.length; i++) {
       try {
         const values = lines[i].split(",").map((v) => v.trim());
@@ -460,37 +464,84 @@ const uploadResultsFromCSV = async (req, res) => {
           continue;
         }
 
-        // Find matching selection by dateISO, time, and horse across ALL systems
-        const selection = await SystemSelection.findOne({
-          dateISO,
+        dateISOs.add(dateISO);
+
+        // Create a unique key for matching
+        const matchKey = `${dateISO}|${time}|${horse}`;
+        csvDataMap.set(matchKey, {
+          row: i + 1,
+          dateOfRace,
+          country,
+          track,
           time,
           horse,
+          betfairSPStr,
+          betfairLayReturnStr,
+          betfairPlaceSPStr,
+          placeLayReturnStr,
         });
+      } catch (error) {
+        errors.push({
+          row: i + 1,
+          error: error.message,
+        });
+      }
+    }
 
-        if (!selection) {
-          unmatchedRows.push({
-            row: i + 1,
-            date: dateOfRace,
-            time,
-            horse,
-            reason:
-              "No matching selection found with this date, time, and horse",
+    // Find all SystemSelections for the dateISO(s) in the CSV
+    const allSelections = await SystemSelection.find({
+      dateISO: { $in: Array.from(dateISOs) },
+    }).lean();
+
+    // Get all unique systemIds from selections and fetch system names
+    const systemIds = [
+      ...new Set(allSelections.map((s) => s.systemId.toString())),
+    ];
+    const systems = await System.find({
+      _id: { $in: systemIds },
+    })
+      .select("_id name")
+      .lean();
+    const systemMap = new Map(systems.map((s) => [s._id.toString(), s.name]));
+
+    // Second pass: Process each SystemSelection
+    for (const selection of allSelections) {
+      try {
+        // Create match key for this selection
+        const matchKey = `${selection.dateISO}|${selection.time}|${selection.horse}`;
+        const csvRow = csvDataMap.get(matchKey);
+
+        // If no CSV match found, this selection is unmatched
+        if (!csvRow) {
+          unmatchedSelections.push({
+            dateISO: selection.dateISO,
+            time: selection.time,
+            horse: selection.horse,
+            systemId: selection.systemId,
+            systemName: systemMap.get(selection.systemId.toString()) || null,
+            reason: "No matching CSV row found for this selection",
           });
           continue;
         }
 
-        // Parse numeric values
+        // Get system name to check if it's System 1 (only System 1 has place data)
+        const systemName = systemMap.get(selection.systemId.toString());
+        const isSystem1 = systemName === "System 1";
+
+        // Parse numeric values from CSV row
         const betfairSP =
-          betfairSPStr && betfairSPStr.trim() ? parseFloat(betfairSPStr) : null;
-        const betfairLayReturn = betfairLayReturnStr
-          ? parseFloat(betfairLayReturnStr)
+          csvRow.betfairSPStr && csvRow.betfairSPStr.trim()
+            ? parseFloat(csvRow.betfairSPStr)
+            : null;
+        const betfairLayReturn = csvRow.betfairLayReturnStr
+          ? parseFloat(csvRow.betfairLayReturnStr)
           : null;
         const betfairPlaceSP =
-          betfairPlaceSPStr && betfairPlaceSPStr.trim()
-            ? parseFloat(betfairPlaceSPStr)
+          csvRow.betfairPlaceSPStr && csvRow.betfairPlaceSPStr.trim()
+            ? parseFloat(csvRow.betfairPlaceSPStr)
             : null;
-        const placeLayReturn = placeLayReturnStr
-          ? parseFloat(placeLayReturnStr)
+        const placeLayReturn = csvRow.placeLayReturnStr
+          ? parseFloat(csvRow.placeLayReturnStr)
           : null;
 
         // Check if Betfair SP is empty/invalid - if so, result is VOID
@@ -511,26 +562,35 @@ const uploadResultsFromCSV = async (req, res) => {
         if (!hasValidBetfairSP) {
           result = "VOID";
           winPL = 0;
-          placePL = 0; // Set to 0 for VOID (Place SP will also be empty)
+          // Only set placePL to 0 for System 1 (VOID case)
+          if (isSystem1) {
+            placePL = 0;
+          }
         } else {
           // Determine result based on lay returns (only if we have valid Betfair SP)
           // If Betfair Lay Return < 0: WON (lay bet lost)
-          // If Place Lay Return < 0 (but win lay return >= 0): PLACED
+          // If Place Lay Return < 0 (but win lay return >= 0): PLACED (only for System 1)
           // If both >= 0: LOST
           if (betfairLayReturn !== null && betfairLayReturn < 0) {
             result = "WON";
-          } else if (placeLayReturn !== null && placeLayReturn < 0) {
+          } else if (
+            isSystem1 &&
+            placeLayReturn !== null &&
+            placeLayReturn < 0
+          ) {
+            // Only System 1 can have PLACED result
             result = "PLACED";
           } else {
+            // For non-System 1, if horse was placed, treat as LOST
             result = "LOST";
           }
 
           // Calculate winPL using the same logic as migration scripts
           winPL = calculateWinPL(result, betfairSP);
 
-          // Edge case 2: Only process place market if Betfair Place SP exists
+          // Edge case 2: Only process place market if Betfair Place SP exists AND it's System 1
           // If no Betfair Place SP, placePL remains null (place market not processed)
-          if (hasValidBetfairPlaceSP) {
+          if (isSystem1 && hasValidBetfairPlaceSP) {
             placePL = calculatePlacePL(result, betfairPlaceSP);
           }
           // Otherwise placePL remains null (place market not processed)
@@ -552,11 +612,11 @@ const uploadResultsFromCSV = async (req, res) => {
         // winPL is always set (0 for VOID, or calculated value)
         runningWinPL += winPL;
 
-        // Calculate runningPlacePL
+        // Calculate runningPlacePL (only for System 1)
         // For VOID cases, placePL is 0, so we still calculate runningPlacePL
         // For cases without place SP, placePL is null, so we don't update runningPlacePL
         let runningPlacePL = null;
-        if (placePL !== null) {
+        if (isSystem1 && placePL !== null) {
           runningPlacePL = previousSelections.reduce(
             (sum, s) => sum + (s.placePL || 0),
             0
@@ -566,8 +626,8 @@ const uploadResultsFromCSV = async (req, res) => {
 
         // Update the selection
         const updateData = {
-          country: country || selection.country,
-          meeting: track || selection.meeting,
+          country: csvRow.country || selection.country,
+          meeting: csvRow.track || selection.meeting,
           result: result.toUpperCase(),
           hasResult: true,
         };
@@ -580,17 +640,19 @@ const uploadResultsFromCSV = async (req, res) => {
         updateData.winPL = winPL;
         updateData.runningWinPL = runningWinPL;
 
-        // Only set placeBsp and placePL if Betfair Place SP exists
-        if (hasValidBetfairPlaceSP) {
+        // Only set placeBsp, placePL, and runningPlacePL if it's System 1 and Betfair Place SP exists
+        if (isSystem1 && hasValidBetfairPlaceSP) {
           updateData.placeBsp = betfairPlaceSP;
         }
-        if (placePL !== null) {
+        if (isSystem1 && placePL !== null) {
           updateData.placePL = placePL;
           updateData.runningPlacePL = runningPlacePL;
         }
 
+        console.log("updateData", updateData);
+
         const updatedSelection = await SystemSelection.findByIdAndUpdate(
-          selection._id,
+          selection._id.toString(),
           updateData,
           { new: true, runValidators: true }
         );
@@ -614,7 +676,9 @@ const uploadResultsFromCSV = async (req, res) => {
             if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
               currentRunningWinPL += subsequent.winPL;
             }
+            // Only update place running totals for System 1
             if (
+              isSystem1 &&
               subsequent.placePL !== null &&
               subsequent.placePL !== undefined
             ) {
@@ -638,7 +702,8 @@ const uploadResultsFromCSV = async (req, res) => {
             const updateSubsequent = {
               runningWinPL: currentRunningWinPL,
             };
-            if (currentRunningPlacePL !== null) {
+            // Only update runningPlacePL for System 1
+            if (isSystem1 && currentRunningPlacePL !== null) {
               updateSubsequent.runningPlacePL = currentRunningPlacePL;
             }
 
@@ -650,11 +715,17 @@ const uploadResultsFromCSV = async (req, res) => {
         }
       } catch (error) {
         errors.push({
-          row: i + 1,
+          selection: {
+            dateISO: selection.dateISO,
+            time: selection.time,
+            horse: selection.horse,
+          },
           error: error.message,
         });
       }
     }
+
+    console.log("unmatchedSelections", unmatchedSelections);
 
     // Populate updated selections
     const populatedSelections = await SystemSelection.find({
@@ -666,7 +737,8 @@ const uploadResultsFromCSV = async (req, res) => {
     res.status(200).json({
       success: true,
       updated: populatedSelections.length,
-      unmatched: unmatchedRows.length > 0 ? unmatchedRows : undefined,
+      unmatched:
+        unmatchedSelections.length > 0 ? unmatchedSelections : undefined,
       errors: errors.length > 0 ? errors : undefined,
       data: populatedSelections,
     });
