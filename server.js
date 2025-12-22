@@ -226,3 +226,50 @@ startServer();
 // };
 
 // findSystemSelectionsWithDateISO();
+
+// One-time function to clean up place market data
+// 1. Change any "PLACED" results to "LOST"
+// 2. Remove placeBsp, placePL, and runningPlacePL from all documents
+const cleanupPlaceMarketData = async () => {
+  try {
+    await connectDB();
+    console.log("🔄 Starting place market data cleanup...");
+
+    // Step 1: Update all "PLACED" results to "LOST" (case-insensitive)
+    const placedUpdateResult = await SystemSelection.updateMany(
+      { result: { $regex: /^PLACED$/i } },
+      { $set: { result: "LOST" } }
+    );
+    console.log(
+      `✅ Updated ${placedUpdateResult.modifiedCount} selections from PLACED to LOST`
+    );
+
+    // Step 2: Remove placeBsp, placePL, and runningPlacePL from all documents
+    const placeFieldsUpdateResult = await SystemSelection.updateMany(
+      {
+        $or: [
+          { placeBsp: { $exists: true, $ne: null } },
+          { placePL: { $exists: true, $ne: null } },
+          { runningPlacePL: { $exists: true, $ne: null } },
+        ],
+      },
+      {
+        $unset: {
+          placeBsp: "",
+          placePL: "",
+          runningPlacePL: "",
+        },
+      }
+    );
+    console.log(
+      `✅ Removed place fields from ${placeFieldsUpdateResult.modifiedCount} selections`
+    );
+
+    console.log("✅ Place market data cleanup completed successfully");
+  } catch (error) {
+    console.error("❌ Error cleaning up place market data:", error.message);
+  }
+};
+
+// Uncomment the line below to run the cleanup function
+// cleanupPlaceMarketData();

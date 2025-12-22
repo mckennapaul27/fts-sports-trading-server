@@ -37,13 +37,19 @@ async function checkSystemAccess(user, systemId) {
 }
 
 // Calculate winPL based on result and BSP
-// Formula: 1 - BSP for WON, 0.98 for LOST/PLACED
+// Formula: 1 - BSP for WON, 0.98 for LOST, 0 for NR/VOID/CANCELLED
 function calculateWinPL(result, winBsp) {
   const upperResult = result.toUpperCase();
   if (upperResult === "WON") {
     return 1 - winBsp; // Negative value (loss for lay bet)
-  } else if (upperResult === "LOST" || upperResult === "PLACED") {
+  } else if (upperResult === "LOST") {
     return 0.98; // 1pt - 2% commission
+  } else if (
+    upperResult === "NR" ||
+    upperResult === "VOID" ||
+    upperResult === "CANCELLED"
+  ) {
+    return 0; // No profit/loss for these results
   }
   return 0;
 }
@@ -466,8 +472,9 @@ const uploadResultsFromCSV = async (req, res) => {
 
         dateISOs.add(dateISO);
 
-        // Create a unique key for matching
-        const matchKey = `${dateISO}|${time}|${horse}`;
+        // Create a unique key for matching (case-insensitive horse name)
+        const normalizedHorse = horse.toLowerCase().trim();
+        const matchKey = `${dateISO}|${time}|${normalizedHorse}`;
         csvDataMap.set(matchKey, {
           row: i + 1,
           dateOfRace,
@@ -507,8 +514,9 @@ const uploadResultsFromCSV = async (req, res) => {
     // Second pass: Process each SystemSelection
     for (const selection of allSelections) {
       try {
-        // Create match key for this selection
-        const matchKey = `${selection.dateISO}|${selection.time}|${selection.horse}`;
+        // Create match key for this selection (case-insensitive horse name)
+        const normalizedHorse = (selection.horse || "").toLowerCase().trim();
+        const matchKey = `${selection.dateISO}|${selection.time}|${normalizedHorse}`;
         const csvRow = csvDataMap.get(matchKey);
 
         // If no CSV match found, this selection is unmatched
@@ -524,11 +532,7 @@ const uploadResultsFromCSV = async (req, res) => {
           continue;
         }
 
-        // Get system name to check if it's System 1 (only System 1 has place data)
-        const systemName = systemMap.get(selection.systemId.toString());
-        const isSystem1 = systemName === "System 1";
-
-        // Parse numeric values from CSV row
+        // Parse numeric values from CSV row (win market only)
         const betfairSP =
           csvRow.betfairSPStr && csvRow.betfairSPStr.trim()
             ? parseFloat(csvRow.betfairSPStr)
@@ -536,64 +540,30 @@ const uploadResultsFromCSV = async (req, res) => {
         const betfairLayReturn = csvRow.betfairLayReturnStr
           ? parseFloat(csvRow.betfairLayReturnStr)
           : null;
-        const betfairPlaceSP =
-          csvRow.betfairPlaceSPStr && csvRow.betfairPlaceSPStr.trim()
-            ? parseFloat(csvRow.betfairPlaceSPStr)
-            : null;
-        const placeLayReturn = csvRow.placeLayReturnStr
-          ? parseFloat(csvRow.placeLayReturnStr)
-          : null;
 
         // Check if Betfair SP is empty/invalid - if so, result is VOID
         const hasValidBetfairSP =
           betfairSP !== null && !isNaN(betfairSP) && betfairSP > 0;
-        const hasValidBetfairPlaceSP =
-          betfairPlaceSP !== null &&
-          !isNaN(betfairPlaceSP) &&
-          betfairPlaceSP > 0;
 
         let result;
         let winPL = null;
-        let placePL = null;
 
         // Edge case 1: If Betfair SP is empty, result is VOID
-        // Note: If Betfair SP is empty, Betfair Place SP will ALWAYS be empty too
-        // For VOID, both winPL and placePL are 0
         if (!hasValidBetfairSP) {
           result = "VOID";
           winPL = 0;
-          // Only set placePL to 0 for System 1 (VOID case)
-          if (isSystem1) {
-            placePL = 0;
-          }
         } else {
           // Determine result based on lay returns (only if we have valid Betfair SP)
           // If Betfair Lay Return < 0: WON (lay bet lost)
-          // If Place Lay Return < 0 (but win lay return >= 0): PLACED (only for System 1)
-          // If both >= 0: LOST
+          // If Betfair Lay Return >= 0: LOST
           if (betfairLayReturn !== null && betfairLayReturn < 0) {
             result = "WON";
-          } else if (
-            isSystem1 &&
-            placeLayReturn !== null &&
-            placeLayReturn < 0
-          ) {
-            // Only System 1 can have PLACED result
-            result = "PLACED";
           } else {
-            // For non-System 1, if horse was placed, treat as LOST
             result = "LOST";
           }
 
           // Calculate winPL using the same logic as migration scripts
           winPL = calculateWinPL(result, betfairSP);
-
-          // Edge case 2: Only process place market if Betfair Place SP exists AND it's System 1
-          // If no Betfair Place SP, placePL remains null (place market not processed)
-          if (isSystem1 && hasValidBetfairPlaceSP) {
-            placePL = calculatePlacePL(result, betfairPlaceSP);
-          }
-          // Otherwise placePL remains null (place market not processed)
         }
 
         // Get all previous selections to calculate running totals
@@ -602,7 +572,7 @@ const uploadResultsFromCSV = async (req, res) => {
           rowOrder: { $lt: selection.rowOrder || 0 },
         })
           .sort({ rowOrder: 1 })
-          .select("winPL placePL");
+          .select("winPL");
 
         // Calculate runningWinPL
         let runningWinPL = previousSelections.reduce(
@@ -611,18 +581,6 @@ const uploadResultsFromCSV = async (req, res) => {
         );
         // winPL is always set (0 for VOID, or calculated value)
         runningWinPL += winPL;
-
-        // Calculate runningPlacePL (only for System 1)
-        // For VOID cases, placePL is 0, so we still calculate runningPlacePL
-        // For cases without place SP, placePL is null, so we don't update runningPlacePL
-        let runningPlacePL = null;
-        if (isSystem1 && placePL !== null) {
-          runningPlacePL = previousSelections.reduce(
-            (sum, s) => sum + (s.placePL || 0),
-            0
-          );
-          runningPlacePL += placePL;
-        }
 
         // Update the selection
         const updateData = {
@@ -639,15 +597,6 @@ const uploadResultsFromCSV = async (req, res) => {
         // Always set winPL (will be 0 for VOID, or calculated value otherwise)
         updateData.winPL = winPL;
         updateData.runningWinPL = runningWinPL;
-
-        // Only set placeBsp, placePL, and runningPlacePL if it's System 1 and Betfair Place SP exists
-        if (isSystem1 && hasValidBetfairPlaceSP) {
-          updateData.placeBsp = betfairPlaceSP;
-        }
-        if (isSystem1 && placePL !== null) {
-          updateData.placePL = placePL;
-          updateData.runningPlacePL = runningPlacePL;
-        }
 
         console.log("updateData", updateData);
 
@@ -667,50 +616,18 @@ const uploadResultsFromCSV = async (req, res) => {
             rowOrder: { $gt: currentRowOrder },
           })
             .sort({ rowOrder: 1 })
-            .select("_id winPL placePL");
+            .select("_id winPL");
 
           let currentRunningWinPL = runningWinPL;
-          let currentRunningPlacePL = runningPlacePL;
 
           for (const subsequent of subsequentSelections) {
             if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
               currentRunningWinPL += subsequent.winPL;
             }
-            // Only update place running totals for System 1
-            if (
-              isSystem1 &&
-              subsequent.placePL !== null &&
-              subsequent.placePL !== undefined
-            ) {
-              if (currentRunningPlacePL === null) {
-                const allPreviousWithPlace = await SystemSelection.find({
-                  systemId: updatedSelection.systemId,
-                  rowOrder: { $lte: subsequent.rowOrder },
-                  placePL: { $ne: null },
-                })
-                  .sort({ rowOrder: 1 })
-                  .select("placePL");
-                currentRunningPlacePL = allPreviousWithPlace.reduce(
-                  (sum, s) => sum + (s.placePL || 0),
-                  0
-                );
-              } else {
-                currentRunningPlacePL += subsequent.placePL;
-              }
-            }
 
-            const updateSubsequent = {
+            await SystemSelection.findByIdAndUpdate(subsequent._id, {
               runningWinPL: currentRunningWinPL,
-            };
-            // Only update runningPlacePL for System 1
-            if (isSystem1 && currentRunningPlacePL !== null) {
-              updateSubsequent.runningPlacePL = currentRunningPlacePL;
-            }
-
-            await SystemSelection.findByIdAndUpdate(
-              subsequent._id,
-              updateSubsequent
-            );
+            });
           }
         }
       } catch (error) {
@@ -1292,7 +1209,7 @@ const markSelectionsViewed = async (req, res) => {
 const updateSelectionResults = async (req, res) => {
   try {
     const { id } = req.params;
-    const { result, winBsp, placeBsp } = req.body;
+    const { result, winBsp } = req.body;
 
     // Find the selection
     const selection = await SystemSelection.findById(id);
@@ -1304,24 +1221,39 @@ const updateSelectionResults = async (req, res) => {
     }
 
     // Validate required fields
-    if (!result || winBsp === undefined) {
+    if (!result || (winBsp !== null && winBsp !== undefined && winBsp !== 0)) {
       return res.status(400).json({
         success: false,
-        error: "result and winBsp are required",
+        error: "result and winBsp (if not 0) are required",
       });
     }
 
-    // Calculate winPL
-    const winPL = calculateWinPL(result, winBsp);
-
-    // Calculate placePL if placeBsp is provided
-    let placePL = null;
-    if (placeBsp !== undefined && placeBsp !== null) {
-      placePL = calculatePlacePL(result, placeBsp);
-    } else if (result.toUpperCase() === "LOST") {
-      // For LOST without placeBsp, still calculate placePL as 0.98
-      placePL = 0.98;
+    const upperResult = result.toUpperCase();
+    const validResults = ["WON", "LOST", "NR", "VOID", "CANCELLED"];
+    if (!validResults.includes(upperResult)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid result. Must be one of: ${validResults.join(", ")}`,
+      });
     }
+
+    // For NR, VOID, or CANCELLED, winBsp must be 0
+    if (
+      (upperResult === "NR" ||
+        upperResult === "VOID" ||
+        upperResult === "CANCELLED") &&
+      winBsp !== 0 &&
+      winBsp !== null &&
+      winBsp !== undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "winBsp must be 0 for NR, VOID, or CANCELLED results",
+      });
+    }
+
+    // Calculate winPL (will be 0 for NR/VOID/CANCELLED)
+    const winPL = calculateWinPL(upperResult, winBsp);
 
     // Get all previous selections for this system (sorted by rowOrder)
     // to calculate running totals
@@ -1331,7 +1263,7 @@ const updateSelectionResults = async (req, res) => {
       _id: { $ne: id }, // Exclude current selection
     })
       .sort({ rowOrder: 1 })
-      .select("winPL placePL");
+      .select("winPL");
 
     // Calculate runningWinPL from previous selections
     // Sum all winPL from selections that come before this one (by rowOrder)
@@ -1339,36 +1271,16 @@ const updateSelectionResults = async (req, res) => {
       (sum, s) => sum + (s.winPL || 0),
       0
     );
-    runningWinPL += winPL; // Add current selection's winPL
+    runningWinPL += winPL; // Add current selection's winPL (0 for NR/VOID/CANCELLED)
 
-    // Calculate runningPlacePL from previous selections
-    let runningPlacePL = null;
-    if (placePL !== null) {
-      runningPlacePL = previousSelections.reduce(
-        (sum, s) => sum + (s.placePL || 0),
-        0
-      );
-      runningPlacePL += placePL; // Add current selection's placePL
-    }
-
-    // Update the current selection first (so subsequent recalculations use updated values)
+    // Update the current selection
     const updateData = {
-      result: result.toUpperCase(),
+      result: upperResult,
       winBsp,
       winPL,
       runningWinPL,
       hasResult: true,
     };
-
-    if (placeBsp !== undefined) {
-      updateData.placeBsp = placeBsp;
-    }
-    if (placePL !== null) {
-      updateData.placePL = placePL;
-    }
-    if (runningPlacePL !== null) {
-      updateData.runningPlacePL = runningPlacePL;
-    }
 
     const updatedSelection = await SystemSelection.findByIdAndUpdate(
       id,
@@ -1389,12 +1301,11 @@ const updateSelectionResults = async (req, res) => {
         rowOrder: { $gt: currentRowOrder },
       })
         .sort({ rowOrder: 1 })
-        .select("_id winPL placePL");
+        .select("_id winPL");
 
       // Recalculate running totals for subsequent selections incrementally
       // Start with the current selection's running totals
       let currentRunningWinPL = runningWinPL;
-      let currentRunningPlacePL = runningPlacePL;
 
       // Update each subsequent selection's running totals
       for (const subsequent of subsequentSelections) {
@@ -1402,39 +1313,11 @@ const updateSelectionResults = async (req, res) => {
         if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
           currentRunningWinPL += subsequent.winPL;
         }
-        if (subsequent.placePL !== null && subsequent.placePL !== undefined) {
-          if (currentRunningPlacePL === null) {
-            // If this is the first selection with placePL after our update,
-            // calculate runningPlacePL from all previous selections with placePL
-            // (this will include the current selection we just updated)
-            const allPreviousWithPlace = await SystemSelection.find({
-              systemId: updatedSelection.systemId,
-              rowOrder: { $lte: subsequent.rowOrder },
-              placePL: { $ne: null },
-            })
-              .sort({ rowOrder: 1 })
-              .select("placePL");
-            currentRunningPlacePL = allPreviousWithPlace.reduce(
-              (sum, s) => sum + (s.placePL || 0),
-              0
-            );
-          } else {
-            currentRunningPlacePL += subsequent.placePL;
-          }
-        }
 
         // Update the subsequent selection
-        const updateSubsequent = {
+        await SystemSelection.findByIdAndUpdate(subsequent._id, {
           runningWinPL: currentRunningWinPL,
-        };
-        if (currentRunningPlacePL !== null) {
-          updateSubsequent.runningPlacePL = currentRunningPlacePL;
-        }
-
-        await SystemSelection.findByIdAndUpdate(
-          subsequent._id,
-          updateSubsequent
-        );
+        });
       }
     }
 
