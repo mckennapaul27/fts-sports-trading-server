@@ -19,6 +19,9 @@ const {
   updateEmailPreferences,
   changePassword,
   existingUserSubscribe,
+  forgotPassword,
+  resetPassword,
+  subscribeToNewsletter,
 } = require("../controllers/userController");
 const { auth } = require("../middleware/auth");
 
@@ -65,5 +68,11 @@ router.delete("/:id", deleteUser);
 router.post("/login", loginUser);
 // /api/users/register-and-subscribe
 router.post("/register-and-subscribe", registerAndSubscribe);
+// /api/users/forgot-password
+router.post("/forgot-password", forgotPassword);
+// /api/users/reset-password
+router.post("/reset-password", resetPassword);
+// /api/users/newsletter-subscribe
+router.post("/newsletter-subscribe", subscribeToNewsletter);
 
 module.exports = router;

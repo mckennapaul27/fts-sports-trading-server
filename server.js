@@ -14,6 +14,7 @@ const promotionRoutes = require("./routes/promotionRoutes");
 const systemResultRoutes = require("./routes/systemResultRoutes");
 const performanceRoutes = require("./routes/performanceRoutes");
 const selectionRoutes = require("./routes/selectionRoutes");
+const downloadRoutes = require("./routes/downloadRoutes");
 
 const stripeWebhookController = require("./controllers/stripeWebhookController");
 
@@ -84,6 +85,7 @@ app.use("/api/promotions", promotionRoutes);
 app.use("/api/system-results", systemResultRoutes);
 app.use("/api/performance", performanceRoutes);
 app.use("/api/selections", selectionRoutes);
+app.use("/api/downloads", downloadRoutes);
 
 // Basic route
 app.get("/", (req, res) => {

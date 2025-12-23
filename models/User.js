@@ -30,6 +30,14 @@ const userSchema = new Schema(
       default: "user",
     },
     activeSystemIds: [{ type: Schema.Types.ObjectId, ref: "System" }],
+    resetToken: {
+      type: String,
+      default: null,
+    },
+    resetTokenExpiry: {
+      type: Date,
+      default: null,
+    },
     // Email notification preferences
     emailPreferences: {
       dailySelections: {

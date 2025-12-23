@@ -4,9 +4,117 @@ const jwt = require("jsonwebtoken");
 const StripeCustomer = require("../models/StripeCustomer");
 const StripeSubscription = require("../models/StripeSubscription");
 const System = require("../models/System");
+const { Resend } = require("resend");
+const brevo = require("@getbrevo/brevo");
+
+const getBrevoApiInstance = () => {
+  const apiInstance = new brevo.ContactsApi();
+  apiInstance.setApiKey(
+    brevo.ContactsApiApiKeys.apiKey,
+    process.env.BREVO_API_KEY
+  );
+  return apiInstance;
+};
+
+const getContactInfo = async (email) => {
+  try {
+    const apiInstance = getBrevoApiInstance();
+    const identifier = email;
+    const res = await apiInstance.getContactInfo(identifier);
+    return res;
+  } catch (error) {
+    if (error.statusCode === 404 || error.response?.status === 404) {
+      console.log("Contact with email ", email, "not found");
+      return false;
+    } else {
+      console.log("Other error calling getContactInfo()", error);
+      throw error;
+    }
+  }
+};
+
+const addContactToList = async (listId, emails) => {
+  try {
+    const apiInstance = getBrevoApiInstance();
+    const contactEmails = new brevo.AddContactToList();
+    contactEmails.emails = emails;
+
+    const res = await apiInstance.addContactToList(listId, contactEmails);
+    return res;
+  } catch (error) {
+    console.log("addContactToList error statusCode", error.statusCode);
+    console.log("addContactToList error body", error.body);
+    throw error;
+  }
+};
+
+const updateContactAttributes = async (email, attributes) => {
+  try {
+    const apiInstance = getBrevoApiInstance();
+    const updateContact = new brevo.UpdateContact();
+    updateContact.attributes = attributes;
+
+    const res = await apiInstance.updateContact(email, updateContact);
+    return res;
+  } catch (error) {
+    console.log("updateContactAttributes error", error);
+    throw error;
+  }
+};
+
+const createBrevoContact = async (email, attributes = {}, listIds = []) => {
+  const apiInstance = getBrevoApiInstance();
+
+  const createContact = new brevo.CreateContact();
+  createContact.email = email;
+  createContact.attributes = attributes;
+  createContact.listIds = listIds;
+
+  try {
+    const data = await apiInstance.createContact(createContact);
+    console.log(
+      "Brevo contact created successfully. Returned data: ",
+      JSON.stringify(data)
+    );
+    return data;
+  } catch (error) {
+    const errorMessage = error.response ? error.response.text : error.message;
+    console.error("Error creating Brevo contact:", errorMessage);
+    console.log("error object", error);
+
+    try {
+      await resend.emails.send({
+        from: "Fortis Sports Trading <noreply@mail.fortissportstrading.com>",
+        to: "mckennapaul27@gmail.com",
+        subject: "Error in createBrevoContact",
+        html: `
+          <h1>Error occurred in createBrevoContact</h1>
+          <p><strong>Email:</strong> ${email}</p>
+          <p><strong>Error Message:</strong></p>
+          <pre>${errorMessage}</pre>
+          <p><strong>Full Error:</strong></p>
+          <pre>${JSON.stringify(error, null, 2)}</pre>
+        `,
+      });
+      console.log(
+        "Resend error notification sent successfully for createBrevoContact."
+      );
+    } catch (resendError) {
+      console.error(
+        "Failed to send Resend error notification for createBrevoContact:",
+        resendError
+      );
+    }
+
+    throw error;
+  }
+};
 
 // Initialize Stripe
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
+// Initialize Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "365d" });
@@ -79,6 +187,21 @@ const createUser = async (req, res) => {
       role: "user",
     });
     await user.save();
+
+    // Add contact to Brevo
+    try {
+      await createBrevoContact(
+        req.body.email.toLowerCase().trim(),
+        {
+          FIRSTNAME: req.body.firstName || "",
+          LASTNAME: req.body.lastName || "",
+        },
+        [4] // Add to list 4
+      );
+    } catch (brevoError) {
+      // Log error but don't fail the user creation process
+      console.error("Failed to add contact to Brevo:", brevoError);
+    }
 
     res.status(201).json({
       success: true,
@@ -232,6 +355,21 @@ const registerAndSubscribe = async (req, res) => {
     });
     // console.log("user", user);
     await user.save();
+
+    // 3.5. Add contact to Brevo
+    try {
+      await createBrevoContact(
+        email.toLowerCase().trim(),
+        {
+          FIRSTNAME: firstName || "",
+          LASTNAME: lastName || "",
+        },
+        [4] // Add to list 4
+      );
+    } catch (brevoError) {
+      // Log error but don't fail the signup process
+      console.error("Failed to add contact to Brevo:", brevoError);
+    }
 
     // 4. Link the Stripe customer to the user in your database
     const customerMapping = new StripeCustomer({
@@ -1161,6 +1299,220 @@ const changePassword = async (req, res) => {
   }
 };
 
+// @desc    Forgot password - send reset token via email
+// @route   POST /api/users/forgot-password
+// @access  Public
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    // Validate email
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+    // Always return success message to prevent email enumeration
+    // Don't reveal if email exists or not
+    if (!user) {
+      return res.json({
+        message:
+          "If an account with that email exists, a password reset link has been sent.",
+      });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const resetTokenExpiry = Date.now() + 3600000; // 1 hour from now
+
+    // Save token and expiry to user
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = new Date(resetTokenExpiry);
+    await user.save();
+
+    // Create reset URL
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+
+    // Send email via Resend
+    try {
+      await resend.emails.send({
+        from: "Fortis Sports Trading <noreply@mail.fortissportstrading.com>",
+        to: user.email,
+        subject: "Password Reset Request",
+        html: `
+          <h1>Password Reset Request</h1>
+          <p>Hi ${user.firstName || "there"},</p>
+          <p>You requested to reset your password. Click the link below to reset it:</p>
+          <p><a href="${resetUrl}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">Reset Password</a></p>
+          <p>Or copy and paste this URL into your browser:</p>
+          <p>${resetUrl}</p>
+          <p>This link will expire in 1 hour.</p>
+          <p>If you didn't request this, please ignore this email.</p>
+          <p>Thanks,<br>Fortis Sports Trading</p>
+        `,
+      });
+
+      res.json({
+        message:
+          "If an account with that email exists, a password reset link has been sent.",
+      });
+    } catch (emailError) {
+      console.error("Error sending reset email:", emailError);
+      // Clear the token if email failed
+      user.resetToken = null;
+      user.resetTokenExpiry = null;
+      await user.save();
+
+      return res.status(500).json({
+        message: "Failed to send reset email. Please try again later.",
+      });
+    }
+  } catch (error) {
+    console.error("Error in forgotPassword:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to process password reset request" });
+  }
+};
+
+// @desc    Reset password using token
+// @route   POST /api/users/reset-password
+// @access  Public
+const resetPassword = async (req, res) => {
+  try {
+    const { token, password } = req.body;
+
+    // Validate required fields
+    if (!token || !password) {
+      return res.status(400).json({
+        message: "Token and password are required",
+      });
+    }
+
+    // Validate password length
+    if (password.length < 8) {
+      return res.status(400).json({
+        message: "Password must be at least 8 characters long",
+      });
+    }
+
+    // Find user with valid reset token
+    const user = await User.findOne({
+      resetToken: token,
+      resetTokenExpiry: { $gt: Date.now() }, // Token must not be expired
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    // Update password (pre-save hook will hash it automatically)
+    user.password = password;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    await user.save();
+
+    res.json({ message: "Password has been reset successfully" });
+  } catch (error) {
+    console.error("Error in resetPassword:", error);
+    res.status(500).json({ message: "Failed to reset password" });
+  }
+};
+
+// @desc    Subscribe to newsletter
+// @route   POST /api/users/newsletter-subscribe
+// @access  Public
+const subscribeToNewsletter = async (req, res) => {
+  try {
+    const { email, firstName, lastName } = req.body;
+
+    // Validate email
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    // Add contact to Brevo with list 5
+    const normalizedEmail = email.toLowerCase().trim();
+    const attributes = {
+      FIRSTNAME: firstName || "",
+      LASTNAME: lastName || "",
+    };
+
+    try {
+      // Try to create the contact
+      await createBrevoContact(normalizedEmail, attributes, [5]);
+      res.json({
+        success: true,
+        message: "Successfully subscribed to newsletter",
+      });
+    } catch (brevoError) {
+      // Check if error is due to duplicate contact
+      const errorData = brevoError.response?.data || brevoError.body;
+      const isDuplicateError =
+        (brevoError.response?.status === 400 ||
+          brevoError.statusCode === 400) &&
+        (errorData?.code === "duplicate_parameter" ||
+          errorData?.message?.includes("already associated") ||
+          errorData?.message?.includes("email is already"));
+
+      if (isDuplicateError) {
+        try {
+          // Contact already exists, just add them to list 5
+          await addContactToList(5, [normalizedEmail]);
+
+          // Optionally update attributes if provided
+          if (firstName || lastName) {
+            try {
+              await updateContactAttributes(normalizedEmail, attributes);
+            } catch (updateError) {
+              // Log but don't fail - adding to list is the main goal
+              console.log("Failed to update contact attributes:", updateError);
+            }
+          }
+
+          res.json({
+            success: true,
+            message: "Successfully subscribed to newsletter",
+          });
+        } catch (addToListError) {
+          console.error(
+            "Failed to add existing contact to newsletter list:",
+            addToListError
+          );
+          res.status(500).json({
+            message:
+              "Failed to subscribe to newsletter. Please try again later.",
+          });
+        }
+      } else {
+        // Some other error occurred
+        console.error(
+          "Failed to subscribe to newsletter in Brevo:",
+          brevoError
+        );
+        res.status(500).json({
+          message: "Failed to subscribe to newsletter. Please try again later.",
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error in subscribeToNewsletter:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to process newsletter subscription" });
+  }
+};
+
 module.exports = {
   getUsers,
   getUser,
@@ -1180,4 +1532,7 @@ module.exports = {
   getEmailPreferences,
   updateEmailPreferences,
   changePassword,
+  forgotPassword,
+  resetPassword,
+  subscribeToNewsletter,
 };
