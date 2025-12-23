@@ -124,6 +124,10 @@ const getSystemPerformance = async (req, res) => {
           strikeRate: 0,
           totalBets: 0,
           roi: 0,
+          averageOdds: 0,
+          longestWinStreak: 0,
+          longestLoseStreak: 0,
+          maxDrawdown: 0,
           cumulativePL: [],
           profitByOddsRange: [],
         },
@@ -134,6 +138,8 @@ const getSystemPerformance = async (req, res) => {
     let totalPL = 0;
     let wins = 0;
     const totalBets = results.length;
+    let sumOdds = 0;
+    let oddsCount = 0;
 
     for (const r of results) {
       const pl = r.winPL || 0;
@@ -141,10 +147,25 @@ const getSystemPerformance = async (req, res) => {
       if (r.result && r.result.toUpperCase().includes("LOST")) {
         wins++;
       }
+      // Calculate average odds
+      if (
+        r.winBsp != null &&
+        r.winBsp !== undefined &&
+        Number.isFinite(r.winBsp)
+      ) {
+        sumOdds += r.winBsp;
+        oddsCount++;
+      }
     }
 
     const strikeRate = totalBets > 0 ? (wins / totalBets) * 100 : 0;
     const roi = totalBets > 0 ? (totalPL / totalBets) * 100 : 0;
+    const averageOdds = oddsCount > 0 ? sumOdds / oddsCount : 0;
+
+    // Calculate streaks and max drawdown
+    const longestWinStreak = calculateLongestWinStreak(results);
+    const longestLoseStreak = calculateLongestLoseStreak(results);
+    const maxDrawdown = calculateMaxDrawdown(results);
 
     // Calculate monthly cumulative P/L
     const monthlyCumulative = calculateMonthlyCumulative(results);
@@ -152,6 +173,10 @@ const getSystemPerformance = async (req, res) => {
     // Calculate profit by odds range
     const profitByOddsRange = calculateProfitByOddsRange(results);
 
+    console.log(
+      "Math.round(maxDrawdown * 100) / 100",
+      Math.round(maxDrawdown * 100) / 100
+    );
     const toSend = {
       success: true,
       data: {
@@ -162,6 +187,10 @@ const getSystemPerformance = async (req, res) => {
         strikeRate: Math.round(strikeRate * 10) / 10, // Round to 1 decimal place
         totalBets,
         roi: Math.round(roi * 10) / 10, // Round to 1 decimal place
+        averageOdds: Math.round(averageOdds * 100) / 100, // Round to 2 decimal places
+        longestWinStreak,
+        longestLoseStreak,
+        maxDrawdown: 0 - Math.round(maxDrawdown * 100) / 100, // Round to 2 decimal places
         cumulativePL: monthlyCumulative,
         profitByOddsRange,
       },
@@ -298,6 +327,76 @@ function calculateProfitByOddsRange(results) {
       avgOdds: Math.round(avgOdds * 100) / 100, // Round to 2 decimal places
     };
   });
+}
+
+/**
+ * Calculate longest win streak
+ * Iterates through results in date order and finds the longest consecutive sequence of wins
+ */
+function calculateLongestWinStreak(results) {
+  let longestStreak = 0;
+  let currentStreak = 0;
+
+  for (const r of results) {
+    const isWin = r.result && r.result.toUpperCase().includes("LOST");
+    if (isWin) {
+      currentStreak++;
+      longestStreak = Math.max(longestStreak, currentStreak);
+    } else {
+      currentStreak = 0;
+    }
+  }
+
+  return longestStreak;
+}
+
+/**
+ * Calculate longest lose streak
+ * Iterates through results in date order and finds the longest consecutive sequence of losses
+ */
+function calculateLongestLoseStreak(results) {
+  let longestStreak = 0;
+  let currentStreak = 0;
+
+  for (const r of results) {
+    const isWin = r.result && r.result.toUpperCase().includes("LOST");
+    if (!isWin) {
+      currentStreak++;
+      longestStreak = Math.max(longestStreak, currentStreak);
+    } else {
+      currentStreak = 0;
+    }
+  }
+
+  return longestStreak;
+}
+
+/**
+ * Calculate maximum drawdown
+ * Tracks cumulative P/L and finds the maximum peak-to-trough decline
+ * Returns the absolute value of the maximum drawdown (positive number)
+ */
+function calculateMaxDrawdown(results) {
+  let maxDrawdown = 0;
+  let peak = 0;
+  let cumulativePL = 0;
+
+  for (const r of results) {
+    cumulativePL += r.winPL || 0;
+
+    // Update peak if we've reached a new high
+    if (cumulativePL > peak) {
+      peak = cumulativePL;
+    }
+
+    // Calculate drawdown from peak
+    const drawdown = peak - cumulativePL;
+    if (drawdown > maxDrawdown) {
+      maxDrawdown = drawdown;
+    }
+  }
+
+  return maxDrawdown;
 }
 
 // @desc    Get all systems with performance stats
