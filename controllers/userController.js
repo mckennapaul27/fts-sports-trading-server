@@ -116,6 +116,67 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 // Initialize Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// Promotion configuration
+const ALL_SYSTEMS_YEARLY_PRODUCT_IDS = {
+  test: "prod_TZZdcgHBZ13uZ9",
+  production: "prod_TePQBlRJx6Yfol",
+};
+
+const COUPON_IDS = {
+  test: "3PTHivK6", // Test/sandbox coupon ID
+  production: process.env.STRIPE_PROMOTION_COUPON_ID || "", // Live coupon ID
+};
+
+/**
+ * Check if promotion should be applied and return coupon ID if applicable
+ * @param {string} productId - The Stripe product ID
+ * @returns {string|null} - Coupon ID if promotion should be applied, null otherwise
+ */
+const getPromotionCouponId = (productId) => {
+  const isProduction = process.env.NODE_ENV === "production";
+
+  // Check if this is All Systems Yearly product
+  const isAllSystemsYearly =
+    productId === ALL_SYSTEMS_YEARLY_PRODUCT_IDS.test ||
+    productId === ALL_SYSTEMS_YEARLY_PRODUCT_IDS.production;
+
+  if (!isAllSystemsYearly) {
+    return null;
+  }
+
+  // Check if promotion is active (January 2026)
+  // Note: Currently set to 2025-01-01 to 2026-12-31 for testing
+  // TODO: Update to actual dates (2026-01-01 to 2026-01-31) before production
+  const now = new Date();
+  // const promotionStart = new Date("2025-01-01T00:00:00Z"); // Testing: past date
+  // const promotionEnd = new Date("2026-12-31T23:59:59Z"); // Testing: future date
+  // Production dates:
+  const promotionStart = new Date("2026-01-01T00:00:00Z");
+  const promotionEnd = new Date("2026-01-31T23:59:59Z");
+
+  const isPromotionActive = now >= promotionStart && now <= promotionEnd;
+
+  if (!isPromotionActive) {
+    return null;
+  }
+
+  // Get the appropriate coupon ID for current environment
+  const couponId = isProduction ? COUPON_IDS.production : COUPON_IDS.test;
+
+  // Only return coupon ID if it's configured (important for production before coupon is created)
+  if (!couponId) {
+    console.log(
+      "[PROMOTION] Promotion is active but coupon ID not configured for production"
+    );
+    return null;
+  }
+
+  console.log(
+    `[PROMOTION] Applying coupon ${couponId} to product ${productId}`
+  );
+  return couponId;
+};
+
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "365d" });
 };
@@ -394,8 +455,11 @@ const registerAndSubscribe = async (req, res) => {
     }
     const priceId = prices.data[0].id;
 
+    // 5.5. Check if promotion should be applied
+    const couponId = getPromotionCouponId(productId);
+
     // 6. Create a Stripe Checkout Session for the subscription
-    const session = await stripe.checkout.sessions.create({
+    const sessionParams = {
       customer: stripeCustomer.id,
       payment_method_types: ["card"],
       line_items: [
@@ -415,7 +479,14 @@ const registerAndSubscribe = async (req, res) => {
           systemSlugs: JSON.stringify(systemSlugs),
         },
       },
-    });
+    };
+
+    // Apply coupon if promotion is active
+    if (couponId) {
+      sessionParams.discounts = [{ coupon: couponId }];
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
     // console.log("session", session);
 
     // 7. Return the session URL to the frontend
@@ -480,8 +551,11 @@ const existingUserSubscribe = async (req, res) => {
     }
     const priceId = prices.data[0].id;
 
+    // 5.5. Check if promotion should be applied
+    const couponId = getPromotionCouponId(productId);
+
     // 6. Create a Stripe Checkout Session for the subscription
-    const session = await stripe.checkout.sessions.create({
+    const sessionParams = {
       customer: stripeCustomerId,
       payment_method_types: ["card"],
       line_items: [
@@ -501,7 +575,14 @@ const existingUserSubscribe = async (req, res) => {
           systemSlugs: JSON.stringify(systemSlugs),
         },
       },
-    });
+    };
+
+    // Apply coupon if promotion is active
+    if (couponId) {
+      sessionParams.discounts = [{ coupon: couponId }];
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
     // console.log("session", session);
 
     // 7. Return the session URL to the frontend
