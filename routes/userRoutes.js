@@ -22,6 +22,7 @@ const {
   forgotPassword,
   resetPassword,
   subscribeToNewsletter,
+  getPromotionInfoForProduct,
 } = require("../controllers/userController");
 const { auth } = require("../middleware/auth");
 
@@ -74,5 +75,7 @@ router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
 // /api/users/newsletter-subscribe
 router.post("/newsletter-subscribe", subscribeToNewsletter);
+// /api/users/promotion/:productId
+router.get("/promotion/:productId", getPromotionInfoForProduct);
 
 module.exports = router;

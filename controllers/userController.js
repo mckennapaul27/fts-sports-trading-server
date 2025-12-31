@@ -123,7 +123,7 @@ const ALL_SYSTEMS_YEARLY_PRODUCT_IDS = {
 };
 
 const COUPON_IDS = {
-  test: "3PTHivK6", // Test/sandbox coupon ID
+  test: process.env.STRIPE_PROMOTION_COUPON_ID || "3PTHivK6", // Use env var if set, fallback to hardcoded
   production: process.env.STRIPE_PROMOTION_COUPON_ID || "", // Live coupon ID
 };
 
@@ -144,15 +144,18 @@ const getPromotionCouponId = (productId) => {
     return null;
   }
 
-  // Check if promotion is active (January 2026)
-  // Note: Currently set to 2025-01-01 to 2026-12-31 for testing
-  // TODO: Update to actual dates (2026-01-01 to 2026-01-31) before production
+  // Check if promotion is active
+  // For testing: Set to a wide date range that includes current date
+  // For production: Update to actual promotion dates (e.g., 2026-01-01 to 2026-01-31)
   const now = new Date();
-  // const promotionStart = new Date("2025-01-01T00:00:00Z"); // Testing: past date
-  // const promotionEnd = new Date("2026-12-31T23:59:59Z"); // Testing: future date
-  // Production dates:
-  const promotionStart = new Date("2026-01-01T00:00:00Z");
-  const promotionEnd = new Date("2026-01-31T23:59:59Z");
+
+  // Testing dates (allows testing now - adjust as needed):
+  const promotionStart = new Date("2024-01-01T00:00:00Z"); // Start from past date for testing
+  const promotionEnd = new Date("2026-12-31T23:59:59Z"); // End in future for testing
+
+  // Production dates (uncomment when ready for production):
+  // const promotionStart = new Date("2026-01-01T00:00:00Z");
+  // const promotionEnd = new Date("2026-01-31T23:59:59Z");
 
   const isPromotionActive = now >= promotionStart && now <= promotionEnd;
 
@@ -175,6 +178,39 @@ const getPromotionCouponId = (productId) => {
     `[PROMOTION] Applying coupon ${couponId} to product ${productId}`
   );
   return couponId;
+};
+
+/**
+ * Get promotion information for a product (for frontend display)
+ * @param {string} productId - The Stripe product ID
+ * @returns {object|null} - Promotion info with discount percentage and active status, or null
+ */
+const getPromotionInfo = (productId) => {
+  const isAllSystemsYearly =
+    productId === ALL_SYSTEMS_YEARLY_PRODUCT_IDS.test ||
+    productId === ALL_SYSTEMS_YEARLY_PRODUCT_IDS.production;
+
+  if (!isAllSystemsYearly) {
+    return null;
+  }
+
+  const now = new Date();
+  const promotionStart = new Date("2024-01-01T00:00:00Z");
+  const promotionEnd = new Date("2026-12-31T23:59:59Z");
+
+  const isPromotionActive = now >= promotionStart && now <= promotionEnd;
+
+  if (!isPromotionActive) {
+    return null;
+  }
+
+  // Return promotion info (50% discount based on your coupon)
+  return {
+    isActive: true,
+    discountPercent: 50,
+    validFrom: promotionStart.toISOString(),
+    validTo: promotionEnd.toISOString(),
+  };
 };
 
 const generateToken = (userId) => {
@@ -1594,6 +1630,45 @@ const subscribeToNewsletter = async (req, res) => {
   }
 };
 
+// @desc    Get promotion info for a product (for frontend display)
+// @route   GET /api/users/promotion/:productId
+// @access  Public
+const getPromotionInfoForProduct = async (req, res) => {
+  try {
+    const { productId } = req.params;
+
+    if (!productId) {
+      return res.status(400).json({
+        success: false,
+        error: "Product ID is required",
+      });
+    }
+
+    const promotionInfo = getPromotionInfo(productId);
+
+    if (!promotionInfo) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          isActive: false,
+          discountPercent: 0,
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: promotionInfo,
+    });
+  } catch (error) {
+    console.error("Error fetching promotion info:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getUsers,
   getUser,
@@ -1616,4 +1691,5 @@ module.exports = {
   forgotPassword,
   resetPassword,
   subscribeToNewsletter,
+  getPromotionInfoForProduct,
 };
