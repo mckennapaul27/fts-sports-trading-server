@@ -16,6 +16,25 @@ function isoToDate(dateISO) {
   return new Date(dateISO + "T00:00:00.000Z");
 }
 
+// Normalize time string for matching (handles "14:30", "14:30:00", etc.)
+function normalizeTime(timeStr) {
+  if (!timeStr) return "";
+  // Remove leading/trailing whitespace
+  let normalized = timeStr.trim();
+  // If time has seconds (HH:MM:SS), remove seconds
+  if (normalized.match(/^\d{1,2}:\d{2}:\d{2}$/)) {
+    normalized = normalized.substring(0, 5); // Keep only HH:MM
+  }
+  // Ensure format is HH:MM (add leading zero if needed for single digit hour)
+  const parts = normalized.split(":");
+  if (parts.length === 2) {
+    const hour = parts[0].padStart(2, "0");
+    const minute = parts[1].padStart(2, "0");
+    normalized = `${hour}:${minute}`;
+  }
+  return normalized;
+}
+
 // Helper function to check if user has access to a system
 // Admins have access to all systems, regular users only to their activeSystemIds
 async function checkSystemAccess(user, systemId) {
@@ -87,6 +106,10 @@ const getSelections = async (req, res) => {
       offset,
       sortBy,
       sortOrder,
+      country,
+      meeting,
+      horse,
+      result,
     } = req.query;
     const query = {};
 
@@ -137,17 +160,32 @@ const getSelections = async (req, res) => {
       }
     }
 
+    // Add filter support
+    if (country && country !== "all") {
+      query.country = country;
+    }
+    if (meeting && meeting !== "all") {
+      query.meeting = meeting;
+    }
+    if (horse && horse.trim()) {
+      // Case-insensitive search for horse name
+      query.horse = { $regex: horse.trim(), $options: "i" };
+    }
+    if (result && result !== "all") {
+      query.result = result;
+    }
+
     // Parse pagination parameters
     const limitNum = limit ? parseInt(limit, 10) : null;
     const offsetNum = offset ? parseInt(offset, 10) : 0;
 
     // Build sort object
-    const sortField = sortBy || "date";
+    const sortField = sortBy || "rowOrder";
     const order = sortOrder === "asc" ? 1 : -1;
     const sortObj = { [sortField]: order };
 
-    // If sorting by date, add time as secondary sort
-    if (sortField === "date") {
+    // If sorting by dateISO, add time as secondary sort
+    if (sortField === "dateISO" || sortField === "date") {
       sortObj.time = 1;
     }
 
@@ -433,6 +471,7 @@ const uploadResultsFromCSV = async (req, res) => {
 
     // PHASE 1: Scan CSV to extract dateISOs (minimal memory - just dates)
     let dateISOs = new Set();
+    const dateParseErrors = [];
     for (let i = 1; i < lines.length; i++) {
       try {
         const values = lines[i].split(",").map((v) => v.trim());
@@ -441,11 +480,25 @@ const uploadResultsFromCSV = async (req, res) => {
           const dateISO = ukToIso(dateOfRace);
           if (dateISO) {
             dateISOs.add(dateISO);
+          } else {
+            dateParseErrors.push({
+              row: i + 1,
+              dateValue: dateOfRace,
+              error: "Could not parse date",
+            });
           }
         }
       } catch (error) {
         // Skip invalid rows in this phase - we'll catch them in phase 2
+        dateParseErrors.push({
+          row: i + 1,
+          error: error.message,
+        });
       }
+    }
+
+    if (dateParseErrors.length > 0 && dateParseErrors.length <= 10) {
+      console.log("Date parsing errors (first 10):", dateParseErrors);
     }
 
     if (dateISOs.size === 0) {
@@ -455,10 +508,20 @@ const uploadResultsFromCSV = async (req, res) => {
       });
     }
 
+    // Log extracted dateISOs for debugging
+    console.log("Extracted dateISOs from CSV:", Array.from(dateISOs).sort());
+
     // PHASE 2: Query selections for the dateISOs found in CSV
+    // Only get selections that don't already have results
     const allSelections = await SystemSelection.find({
       dateISO: { $in: Array.from(dateISOs) },
+      hasResult: { $ne: true }, // Only selections without results
     }).lean();
+
+    console.log(
+      `Found ${allSelections.length} selections without results for dateISOs:`,
+      Array.from(dateISOs).sort()
+    );
 
     // Get system names for unmatched selections reporting
     const systemIds = [
@@ -473,14 +536,31 @@ const uploadResultsFromCSV = async (req, res) => {
 
     // PHASE 3: Build selection lookup Map (key: matchKey, value: { selection, matched: false })
     const selectionMap = new Map();
+    const sampleSelectionKeys = [];
     for (const selection of allSelections) {
       const normalizedHorse = (selection.horse || "").toLowerCase().trim();
-      const matchKey = `${selection.dateISO}|${selection.time}|${normalizedHorse}`;
+      const normalizedTime = normalizeTime(selection.time || "");
+      const matchKey = `${selection.dateISO}|${normalizedTime}|${normalizedHorse}`;
       selectionMap.set(matchKey, {
         selection,
         matched: false,
       });
+      // Collect sample keys for debugging
+      if (sampleSelectionKeys.length < 5) {
+        sampleSelectionKeys.push({
+          matchKey,
+          dateISO: selection.dateISO,
+          time: selection.time,
+          normalizedTime,
+          horse: selection.horse,
+          normalizedHorse,
+        });
+      }
     }
+
+    console.log(
+      `Built selection map with ${selectionMap.size} selections to match against CSV`
+    );
 
     // PHASE 4: Process CSV line-by-line and match against selections
     // Collect updates in memory (only ~300 selections will match)
@@ -518,13 +598,23 @@ const uploadResultsFromCSV = async (req, res) => {
           continue;
         }
 
-        // Create match key (case-insensitive horse name)
+        // Create match key (case-insensitive horse name, normalized time)
         const normalizedHorse = horse.toLowerCase().trim();
-        const matchKey = `${dateISO}|${time}|${normalizedHorse}`;
+        const normalizedTime = normalizeTime(time || "");
+        const matchKey = `${dateISO}|${normalizedTime}|${normalizedHorse}`;
+
         const entry = selectionMap.get(matchKey);
 
         // If no selection matches this CSV row, skip it (we don't care about unmatched CSV rows)
         if (!entry) {
+          continue;
+        }
+
+        // Double-check: Skip if this selection already has a result (safety check)
+        if (entry.selection.hasResult) {
+          console.log(
+            `Skipping selection ${entry.selection._id} - already has result: ${entry.selection.result}`
+          );
           continue;
         }
 
@@ -539,30 +629,30 @@ const uploadResultsFromCSV = async (req, res) => {
           ? parseFloat(betfairLayReturnStr)
           : null;
 
-        // Check if Betfair SP is empty/invalid - if so, result is VOID
+        // Check if Betfair SP is valid - if not, race hasn't been settled yet, skip this selection
         const hasValidBetfairSP =
           betfairSP !== null && !isNaN(betfairSP) && betfairSP > 0;
 
-        let result;
-        let winPL = null;
-
-        // Edge case 1: If Betfair SP is empty, result is VOID
+        // If no valid Betfair SP, race hasn't been settled - skip this selection
         if (!hasValidBetfairSP) {
-          result = "VOID";
-          winPL = 0;
-        } else {
-          // Determine result based on lay returns (only if we have valid Betfair SP)
-          // If Betfair Lay Return < 0: WON (lay bet lost)
-          // If Betfair Lay Return >= 0: LOST
-          if (betfairLayReturn !== null && betfairLayReturn < 0) {
-            result = "WON";
-          } else {
-            result = "LOST";
-          }
-
-          // Calculate winPL using the same logic as migration scripts
-          winPL = calculateWinPL(result, betfairSP);
+          console.log(
+            `Skipping selection ${selection._id} (${selection.dateISO} ${selection.time} ${selection.horse}) - no Betfair SP (race not settled)`
+          );
+          continue;
         }
+
+        // Determine result based on lay returns (only if we have valid Betfair SP)
+        // If Betfair Lay Return < 0: WON (lay bet lost)
+        // If Betfair Lay Return >= 0: LOST
+        let result;
+        if (betfairLayReturn !== null && betfairLayReturn < 0) {
+          result = "WON";
+        } else {
+          result = "LOST";
+        }
+
+        // Calculate winPL using the same logic as migration scripts
+        const winPL = calculateWinPL(result, betfairSP);
 
         // Prepare update data
         const updateData = {
@@ -570,13 +660,9 @@ const uploadResultsFromCSV = async (req, res) => {
           meeting: track || selection.meeting,
           result: result.toUpperCase(),
           hasResult: true,
+          winBsp: betfairSP, // We know betfairSP is valid here (we skip if not)
           winPL: winPL,
         };
-
-        // Only set winBsp if Betfair SP is valid (not VOID case)
-        if (hasValidBetfairSP) {
-          updateData.winBsp = betfairSP;
-        }
 
         // Store update with selection info for running total calculation
         updates.push({
@@ -586,6 +672,12 @@ const uploadResultsFromCSV = async (req, res) => {
           updateData,
           winPL,
         });
+
+        console.log(
+          `Matched CSV row ${i + 1} to selection ${selection._id} (${
+            selection.dateISO
+          } ${selection.time} ${selection.horse})`
+        );
       } catch (error) {
         errors.push({
           row: i + 1,
@@ -594,8 +686,11 @@ const uploadResultsFromCSV = async (req, res) => {
       }
     }
 
-    // PHASE 5: Find unmatched selections
+    console.log(`Total updates collected: ${updates.length}`);
+
+    // PHASE 5: Find unmatched selections and debug why they don't match
     const unmatchedSelections = [];
+
     for (const [matchKey, entry] of selectionMap.entries()) {
       if (!entry.matched) {
         const selection = entry.selection;
@@ -608,6 +703,31 @@ const uploadResultsFromCSV = async (req, res) => {
           reason: "No matching CSV row found for this selection",
         });
       }
+    }
+
+    console.log(`Unmatched selections: ${unmatchedSelections.length}`);
+
+    // Debug: Show unmatched selections with their match keys
+    if (unmatchedSelections.length > 0) {
+      console.log("\n=== DEBUGGING UNMATCHED SELECTIONS ===");
+      const sampleUnmatched = unmatchedSelections.slice(0, 20).map((s) => {
+        const normalizedHorse = (s.horse || "").toLowerCase().trim();
+        const normalizedTime = normalizeTime(s.time || "");
+        const matchKey = `${s.dateISO}|${normalizedTime}|${normalizedHorse}`;
+        return {
+          matchKey,
+          dateISO: s.dateISO,
+          time: s.time,
+          normalizedTime,
+          horse: s.horse,
+          normalizedHorse,
+          systemName: s.systemName,
+        };
+      });
+      console.log(
+        "First 20 unmatched selections:",
+        JSON.stringify(sampleUnmatched, null, 2)
+      );
     }
 
     if (updates.length === 0) {
@@ -711,7 +831,16 @@ const uploadResultsFromCSV = async (req, res) => {
 
     // PHASE 7: Execute bulk updates
     if (bulkOps.length > 0) {
-      await SystemSelection.bulkWrite(bulkOps, { ordered: false });
+      console.log(`Executing ${bulkOps.length} bulk update operations`);
+      const bulkResult = await SystemSelection.bulkWrite(bulkOps, {
+        ordered: false,
+      });
+      console.log(`Bulk update result:`, {
+        matched: bulkResult.matchedCount,
+        modified: bulkResult.modifiedCount,
+      });
+    } else {
+      console.log("No bulk operations to execute");
     }
 
     // PHASE 8: Fetch and populate updated selections for response
@@ -1443,6 +1572,67 @@ const deleteSelections = async (req, res) => {
   }
 };
 
+// @desc    Get distinct filter values for selections
+// @route   GET /api/selections/filters
+// @access  Private (Admin)
+const getSelectionFilters = async (req, res) => {
+  try {
+    const { systemId } = req.query;
+
+    if (!systemId) {
+      return res.status(400).json({
+        success: false,
+        error: "systemId is required",
+      });
+    }
+
+    // Verify user has access (admin check)
+    if (req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins can access filter options",
+      });
+    }
+
+    // Build base query
+    const query = { systemId };
+
+    // Get distinct values
+    const [countriesRaw, meetingsRaw, resultsRaw] = await Promise.all([
+      SystemSelection.distinct("country", query),
+      SystemSelection.distinct("meeting", query),
+      SystemSelection.distinct("result", query),
+    ]);
+
+    // Filter out null/undefined and sort
+    const countries = (countriesRaw || [])
+      .filter((v) => v && v.trim())
+      .sort((a, b) => a.localeCompare(b));
+
+    const meetings = (meetingsRaw || [])
+      .filter((v) => v && v.trim())
+      .sort((a, b) => a.localeCompare(b));
+
+    const results = (resultsRaw || [])
+      .filter((v) => v && v.trim())
+      .sort((a, b) => a.localeCompare(b));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        countries,
+        meetings,
+        results,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getSelections,
   getTodaySelections,
@@ -1456,4 +1646,5 @@ module.exports = {
   deleteSelection,
   markSelectionsViewed,
   deleteSelections,
+  getSelectionFilters,
 };

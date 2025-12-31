@@ -15,6 +15,7 @@ const {
   deleteSelection,
   markSelectionsViewed,
   deleteSelections,
+  getSelectionFilters,
 } = require("../controllers/selectionController");
 
 // Configure multer for CSV file uploads (store in memory)
@@ -92,6 +93,7 @@ router.route("/upload-results-csv").post(
   },
   uploadResultsFromCSV
 );
+router.get("/filters", auth, getSelectionFilters);
 router.route("/").post(auth, admin, createSelection);
 router.route("/").delete(auth, admin, deleteSelections);
 router.route("/:id/results").put(auth, admin, updateSelectionResults);
