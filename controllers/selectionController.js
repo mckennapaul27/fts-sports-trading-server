@@ -387,7 +387,7 @@ const uploadResultsFromCSV = async (req, res) => {
     // Read CSV file content
     const csvText = req.file.buffer.toString("utf-8");
 
-    // Parse CSV
+    // Parse CSV lines
     const lines = csvText
       .split("\n")
       .map((line) => line.trim())
@@ -429,14 +429,62 @@ const uploadResultsFromCSV = async (req, res) => {
       });
     }
 
-    const updatedSelections = [];
-    const unmatchedSelections = [];
     const errors = [];
 
-    // First pass: Parse CSV and build a map of CSV data by dateISO+time+horse
-    // Also collect all unique dateISO values
-    const csvDataMap = new Map(); // key: `${dateISO}|${time}|${horse}`, value: CSV row data
-    const dateISOs = new Set();
+    // PHASE 1: Scan CSV to extract dateISOs (minimal memory - just dates)
+    let dateISOs = new Set();
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        const values = lines[i].split(",").map((v) => v.trim());
+        const dateOfRace = values[dateOfRaceIdx];
+        if (dateOfRace) {
+          const dateISO = ukToIso(dateOfRace);
+          if (dateISO) {
+            dateISOs.add(dateISO);
+          }
+        }
+      } catch (error) {
+        // Skip invalid rows in this phase - we'll catch them in phase 2
+      }
+    }
+
+    if (dateISOs.size === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No valid dates found in CSV",
+      });
+    }
+
+    // PHASE 2: Query selections for the dateISOs found in CSV
+    const allSelections = await SystemSelection.find({
+      dateISO: { $in: Array.from(dateISOs) },
+    }).lean();
+
+    // Get system names for unmatched selections reporting
+    const systemIds = [
+      ...new Set(allSelections.map((s) => s.systemId.toString())),
+    ];
+    const systems = await System.find({
+      _id: { $in: systemIds },
+    })
+      .select("_id name")
+      .lean();
+    const systemMap = new Map(systems.map((s) => [s._id.toString(), s.name]));
+
+    // PHASE 3: Build selection lookup Map (key: matchKey, value: { selection, matched: false })
+    const selectionMap = new Map();
+    for (const selection of allSelections) {
+      const normalizedHorse = (selection.horse || "").toLowerCase().trim();
+      const matchKey = `${selection.dateISO}|${selection.time}|${normalizedHorse}`;
+      selectionMap.set(matchKey, {
+        selection,
+        matched: false,
+      });
+    }
+
+    // PHASE 4: Process CSV line-by-line and match against selections
+    // Collect updates in memory (only ~300 selections will match)
+    const updates = []; // Array of { selectionId, updateData, winPL }
 
     for (let i = 1; i < lines.length; i++) {
       try {
@@ -470,75 +518,25 @@ const uploadResultsFromCSV = async (req, res) => {
           continue;
         }
 
-        dateISOs.add(dateISO);
-
-        // Create a unique key for matching (case-insensitive horse name)
+        // Create match key (case-insensitive horse name)
         const normalizedHorse = horse.toLowerCase().trim();
         const matchKey = `${dateISO}|${time}|${normalizedHorse}`;
-        csvDataMap.set(matchKey, {
-          row: i + 1,
-          dateOfRace,
-          country,
-          track,
-          time,
-          horse,
-          betfairSPStr,
-          betfairLayReturnStr,
-          betfairPlaceSPStr,
-          placeLayReturnStr,
-        });
-      } catch (error) {
-        errors.push({
-          row: i + 1,
-          error: error.message,
-        });
-      }
-    }
+        const entry = selectionMap.get(matchKey);
 
-    // Find all SystemSelections for the dateISO(s) in the CSV
-    const allSelections = await SystemSelection.find({
-      dateISO: { $in: Array.from(dateISOs) },
-    }).lean();
-
-    // Get all unique systemIds from selections and fetch system names
-    const systemIds = [
-      ...new Set(allSelections.map((s) => s.systemId.toString())),
-    ];
-    const systems = await System.find({
-      _id: { $in: systemIds },
-    })
-      .select("_id name")
-      .lean();
-    const systemMap = new Map(systems.map((s) => [s._id.toString(), s.name]));
-
-    // Second pass: Process each SystemSelection
-    for (const selection of allSelections) {
-      try {
-        // Create match key for this selection (case-insensitive horse name)
-        const normalizedHorse = (selection.horse || "").toLowerCase().trim();
-        const matchKey = `${selection.dateISO}|${selection.time}|${normalizedHorse}`;
-        const csvRow = csvDataMap.get(matchKey);
-
-        // If no CSV match found, this selection is unmatched
-        if (!csvRow) {
-          unmatchedSelections.push({
-            dateISO: selection.dateISO,
-            time: selection.time,
-            horse: selection.horse,
-            systemId: selection.systemId,
-            systemName: systemMap.get(selection.systemId.toString()) || null,
-            reason: "No matching CSV row found for this selection",
-          });
+        // If no selection matches this CSV row, skip it (we don't care about unmatched CSV rows)
+        if (!entry) {
           continue;
         }
 
-        // Parse numeric values from CSV row (win market only)
+        // Mark selection as matched
+        entry.matched = true;
+        const selection = entry.selection;
+
+        // Parse numeric values from CSV row
         const betfairSP =
-          csvRow.betfairSPStr && csvRow.betfairSPStr.trim()
-            ? parseFloat(csvRow.betfairSPStr)
-            : null;
-        const betfairLayReturn = csvRow.betfairLayReturnStr
-          ? parseFloat(csvRow.betfairLayReturnStr)
+          betfairSPStr && betfairSPStr.trim() ? parseFloat(betfairSPStr) : null;
+        const betfairLayReturn = betfairLayReturnStr
+          ? parseFloat(betfairLayReturnStr)
           : null;
 
         // Check if Betfair SP is empty/invalid - if so, result is VOID
@@ -566,87 +564,159 @@ const uploadResultsFromCSV = async (req, res) => {
           winPL = calculateWinPL(result, betfairSP);
         }
 
-        // Get all previous selections to calculate running totals
-        const previousSelections = await SystemSelection.find({
-          systemId: selection.systemId,
-          rowOrder: { $lt: selection.rowOrder || 0 },
-        })
-          .sort({ rowOrder: 1 })
-          .select("winPL");
-
-        // Calculate runningWinPL
-        let runningWinPL = previousSelections.reduce(
-          (sum, s) => sum + (s.winPL || 0),
-          0
-        );
-        // winPL is always set (0 for VOID, or calculated value)
-        runningWinPL += winPL;
-
-        // Update the selection
+        // Prepare update data
         const updateData = {
-          country: csvRow.country || selection.country,
-          meeting: csvRow.track || selection.meeting,
+          country: country || selection.country,
+          meeting: track || selection.meeting,
           result: result.toUpperCase(),
           hasResult: true,
+          winPL: winPL,
         };
 
         // Only set winBsp if Betfair SP is valid (not VOID case)
         if (hasValidBetfairSP) {
           updateData.winBsp = betfairSP;
         }
-        // Always set winPL (will be 0 for VOID, or calculated value otherwise)
-        updateData.winPL = winPL;
-        updateData.runningWinPL = runningWinPL;
 
-        console.log("updateData", updateData);
-
-        const updatedSelection = await SystemSelection.findByIdAndUpdate(
-          selection._id.toString(),
+        // Store update with selection info for running total calculation
+        updates.push({
+          selectionId: selection._id,
+          systemId: selection.systemId,
+          rowOrder: selection.rowOrder || 0,
           updateData,
-          { new: true, runValidators: true }
-        );
-
-        updatedSelections.push(updatedSelection);
-
-        // Recalculate running totals for subsequent selections
-        const currentRowOrder = updatedSelection.rowOrder;
-        if (currentRowOrder !== null && currentRowOrder !== undefined) {
-          const subsequentSelections = await SystemSelection.find({
-            systemId: updatedSelection.systemId,
-            rowOrder: { $gt: currentRowOrder },
-          })
-            .sort({ rowOrder: 1 })
-            .select("_id winPL");
-
-          let currentRunningWinPL = runningWinPL;
-
-          for (const subsequent of subsequentSelections) {
-            if (subsequent.winPL !== null && subsequent.winPL !== undefined) {
-              currentRunningWinPL += subsequent.winPL;
-            }
-
-            await SystemSelection.findByIdAndUpdate(subsequent._id, {
-              runningWinPL: currentRunningWinPL,
-            });
-          }
-        }
+          winPL,
+        });
       } catch (error) {
         errors.push({
-          selection: {
-            dateISO: selection.dateISO,
-            time: selection.time,
-            horse: selection.horse,
-          },
+          row: i + 1,
           error: error.message,
         });
       }
     }
 
-    console.log("unmatchedSelections", unmatchedSelections);
+    // PHASE 5: Find unmatched selections
+    const unmatchedSelections = [];
+    for (const [matchKey, entry] of selectionMap.entries()) {
+      if (!entry.matched) {
+        const selection = entry.selection;
+        unmatchedSelections.push({
+          dateISO: selection.dateISO,
+          time: selection.time,
+          horse: selection.horse,
+          systemId: selection.systemId,
+          systemName: systemMap.get(selection.systemId.toString()) || null,
+          reason: "No matching CSV row found for this selection",
+        });
+      }
+    }
 
-    // Populate updated selections
+    if (updates.length === 0) {
+      return res.status(200).json({
+        success: true,
+        updated: 0,
+        unmatched:
+          unmatchedSelections.length > 0 ? unmatchedSelections : undefined,
+        errors: errors.length > 0 ? errors : undefined,
+        data: [],
+      });
+    }
+
+    // PHASE 6: Efficiently recalculate running totals
+    // Group updates by systemId
+    const updatesBySystem = new Map();
+    for (const update of updates) {
+      const systemIdStr = update.systemId.toString();
+      if (!updatesBySystem.has(systemIdStr)) {
+        updatesBySystem.set(systemIdStr, []);
+      }
+      updatesBySystem.get(systemIdStr).push(update);
+    }
+
+    // For each system with updates, fetch all selections and recalculate running totals
+    const bulkOps = [];
+    const updatedSelectionIds = new Set(
+      updates.map((u) => u.selectionId.toString())
+    );
+
+    for (const [systemIdStr, systemUpdates] of updatesBySystem.entries()) {
+      // Use the original ObjectId from the first update (Mongoose handles string conversion, but ObjectId is safer)
+      const systemId = systemUpdates[0].systemId;
+
+      // Get all selections for this system, sorted by rowOrder
+      const allSystemSelections = await SystemSelection.find({
+        systemId: systemId,
+      })
+        .sort({ rowOrder: 1 })
+        .select("_id rowOrder winPL")
+        .lean();
+
+      // Create a map of updates by selectionId for quick lookup
+      const updatesMap = new Map();
+      for (const update of systemUpdates) {
+        updatesMap.set(update.selectionId.toString(), update);
+      }
+
+      // Track if we've encountered any updated selection (to know if subsequent ones need updating)
+      let hasEncounteredUpdate = false;
+
+      // Recalculate running totals from scratch for all selections in this system
+      // This is correct because:
+      // - For selections being updated: we use the new winPL value
+      // - For selections with existing results: we use their existing winPL value
+      // - For selections without results: we use 0 (winPL is null/undefined)
+      // Starting from 0 and accumulating ensures cumulative totals are correct
+      let runningWinPL = 0;
+
+      // Calculate running totals in one pass through all selections (sorted by rowOrder)
+      for (const systemSelection of allSystemSelections) {
+        const selectionIdStr = systemSelection._id.toString();
+        const update = updatesMap.get(selectionIdStr);
+
+        // Use updated winPL if this selection was updated in this CSV,
+        // otherwise use existing winPL (from previous CSV uploads or null/0 if no result yet)
+        const currentWinPL =
+          update !== undefined ? update.winPL : systemSelection.winPL || 0;
+        runningWinPL += currentWinPL;
+
+        // Track if we've encountered an update
+        if (update !== undefined) {
+          hasEncounteredUpdate = true;
+          // This selection was updated - include all update fields
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: systemSelection._id },
+              update: {
+                $set: {
+                  ...update.updateData,
+                  runningWinPL: runningWinPL,
+                },
+              },
+            },
+          });
+        } else if (hasEncounteredUpdate) {
+          // This selection comes after an updated one, so its running total needs updating
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: systemSelection._id },
+              update: {
+                $set: {
+                  runningWinPL: runningWinPL,
+                },
+              },
+            },
+          });
+        }
+      }
+    }
+
+    // PHASE 7: Execute bulk updates
+    if (bulkOps.length > 0) {
+      await SystemSelection.bulkWrite(bulkOps, { ordered: false });
+    }
+
+    // PHASE 8: Fetch and populate updated selections for response
     const populatedSelections = await SystemSelection.find({
-      _id: { $in: updatedSelections.map((s) => s._id) },
+      _id: { $in: Array.from(updatedSelectionIds) },
     })
       .populate("systemId", "name slug")
       .populate("createdBy", "firstName lastName email");
