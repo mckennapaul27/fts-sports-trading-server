@@ -698,6 +698,7 @@ const uploadResultsFromCSV = async (req, res) => {
           dateISO: selection.dateISO,
           time: selection.time,
           horse: selection.horse,
+          meeting: selection.meeting,
           systemId: selection.systemId,
           systemName: systemMap.get(selection.systemId.toString()) || null,
           reason: "No matching CSV row found for this selection",
