@@ -22,6 +22,7 @@ const {
   forgotPassword,
   resetPassword,
   subscribeToNewsletter,
+  subscribeToAutomationBot,
   getPromotionInfoForProduct,
 } = require("../controllers/userController");
 const { auth } = require("../middleware/auth");
@@ -75,6 +76,8 @@ router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
 // /api/users/newsletter-subscribe
 router.post("/newsletter-subscribe", subscribeToNewsletter);
+// /api/users/automation-bot-subscribe
+router.post("/automation-bot-subscribe", subscribeToAutomationBot);
 // /api/users/promotion/:productId
 router.get("/promotion/:productId", getPromotionInfoForProduct);
 

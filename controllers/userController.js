@@ -1630,6 +1630,97 @@ const subscribeToNewsletter = async (req, res) => {
   }
 };
 
+// @desc    Subscribe to automation bot updates
+// @route   POST /api/users/automation-bot-subscribe
+// @access  Public
+const subscribeToAutomationBot = async (req, res) => {
+  try {
+    const { email, firstName, lastName } = req.body;
+
+    // Validate email
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    // Add contact to Brevo with list 6
+    const normalizedEmail = email.toLowerCase().trim();
+    const attributes = {
+      FIRSTNAME: firstName || "",
+      LASTNAME: lastName || "",
+    };
+
+    try {
+      // Try to create the contact
+      await createBrevoContact(normalizedEmail, attributes, [6]);
+      res.json({
+        success: true,
+        message: "Successfully subscribed to automation bot updates",
+      });
+    } catch (brevoError) {
+      // Check if error is due to duplicate contact
+      const errorData = brevoError.response?.data || brevoError.body;
+      const isDuplicateError =
+        (brevoError.response?.status === 400 ||
+          brevoError.statusCode === 400) &&
+        (errorData?.code === "duplicate_parameter" ||
+          errorData?.message?.includes("already associated") ||
+          errorData?.message?.includes("email is already"));
+
+      if (isDuplicateError) {
+        try {
+          // Contact already exists, just add them to list 6
+          await addContactToList(6, [normalizedEmail]);
+
+          // Optionally update attributes if provided
+          if (firstName || lastName) {
+            try {
+              await updateContactAttributes(normalizedEmail, attributes);
+            } catch (updateError) {
+              // Log but don't fail - adding to list is the main goal
+              console.log("Failed to update contact attributes:", updateError);
+            }
+          }
+
+          res.json({
+            success: true,
+            message: "Successfully subscribed to automation bot updates",
+          });
+        } catch (addToListError) {
+          console.error(
+            "Failed to add existing contact to automation bot list:",
+            addToListError
+          );
+          res.status(500).json({
+            message:
+              "Failed to subscribe to automation bot updates. Please try again later.",
+          });
+        }
+      } else {
+        // Some other error occurred
+        console.error(
+          "Failed to subscribe to automation bot in Brevo:",
+          brevoError
+        );
+        res.status(500).json({
+          message:
+            "Failed to subscribe to automation bot updates. Please try again later.",
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error in subscribeToAutomationBot:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to process automation bot subscription" });
+  }
+};
+
 // @desc    Get promotion info for a product (for frontend display)
 // @route   GET /api/users/promotion/:productId
 // @access  Public
@@ -1691,5 +1782,6 @@ module.exports = {
   forgotPassword,
   resetPassword,
   subscribeToNewsletter,
+  subscribeToAutomationBot,
   getPromotionInfoForProduct,
 };

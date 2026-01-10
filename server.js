@@ -27,10 +27,6 @@ const app = express();
 
 // Define your whitelist for CORS
 const whiteList = [
-  /bunkerdigital\.co.uk$/,
-  /bunkerdigital\.com$/,
-  /bunkerdigital\.com$/,
-  /bunker-digital-fe-new-tw.vercel\.app$/,
   /fts-sports-trading-fe.vercel\.app$/,
   /fortissportstrading\.com$/,
 ];
