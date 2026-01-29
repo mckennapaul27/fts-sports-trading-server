@@ -5,6 +5,7 @@ dotenv.config();
 const express = require("express");
 const cors = require("cors");
 const cron = require("node-cron");
+const mongoose = require("mongoose");
 const connectDB = require("./config/database");
 const userRoutes = require("./routes/userRoutes");
 const systemRoutes = require("./routes/systemRoutes");
@@ -22,6 +23,7 @@ const System = require("./models/System");
 const { syncAllSystems, syncSystemResults } = require("./services/syncService");
 const SystemResult = require("./models/SystemResult");
 const SystemSelection = require("./models/SystemSelection");
+const Plan = require("./models/Plan");
 
 const app = express();
 
@@ -173,101 +175,5 @@ const startServer = async () => {
 
 startServer();
 
-// // // One-time function to add initial system
-// const initializeSystem = async () => {
-//   try {
-//     const existingSystem = await System.findOne({ slug: "system-3" });
-//     if (existingSystem) {
-//       console.log("System 'system-2' already exists, skipping initialization");
-//       return;
-//     }
 
-//     const system = await System.create({
-//       name: "System 3",
-//       slug: "system-3",
-//       isActive: true,
-//       sheets: {
-//         // don't add selections for now
-//         selections: {
-//           spreadsheetId: "1JNnNoLjuCQvu66NU-LulDdNV9NGIcSHI1LAaYoU98nk",
-//           range: "System3", // Placeholder - update with actual selections range
-//         },
-//         results: {
-//           spreadsheetId: "1JNnNoLjuCQvu66NU-LulDdNV9NGIcSHI1LAaYoU98nk",
-//           range: "System3",
-//         },
-//       },
-//     });
 
-//     console.log("✅ System 'system-3' created successfully:", system);
-//   } catch (error) {
-//     console.error("❌ Error initializing system:", error.message);
-//   }
-// };
-
-// initializeSystem();
-
-// async function to find system selection with horse called Birdman Bob
-// (async () => {
-//   const selections = await SystemSelection.deleteOne({
-//     horse: "Avada Kedavra",
-//   });
-//   console.log("selections", selections);
-// })();
-
-// ASYNC FUNCT TO FIND ALL SYSTEMSELECTIONS WITH DATEISO OF 2025-12-19
-// const findSystemSelectionsWithDateISO = async () => {
-//   const selections = await SystemSelection.deleteMany({
-//     dateISO: "2025-12-19",
-//   });
-//   console.log("selections", selections.length);
-// };
-
-// findSystemSelectionsWithDateISO();
-
-// One-time function to clean up place market data
-// 1. Change any "PLACED" results to "LOST"
-// 2. Remove placeBsp, placePL, and runningPlacePL from all documents
-const cleanupPlaceMarketData = async () => {
-  try {
-    await connectDB();
-    console.log("🔄 Starting place market data cleanup...");
-
-    // Step 1: Update all "PLACED" results to "LOST" (case-insensitive)
-    const placedUpdateResult = await SystemSelection.updateMany(
-      { result: { $regex: /^PLACED$/i } },
-      { $set: { result: "LOST" } }
-    );
-    console.log(
-      `✅ Updated ${placedUpdateResult.modifiedCount} selections from PLACED to LOST`
-    );
-
-    // Step 2: Remove placeBsp, placePL, and runningPlacePL from all documents
-    const placeFieldsUpdateResult = await SystemSelection.updateMany(
-      {
-        $or: [
-          { placeBsp: { $exists: true, $ne: null } },
-          { placePL: { $exists: true, $ne: null } },
-          { runningPlacePL: { $exists: true, $ne: null } },
-        ],
-      },
-      {
-        $unset: {
-          placeBsp: "",
-          placePL: "",
-          runningPlacePL: "",
-        },
-      }
-    );
-    console.log(
-      `✅ Removed place fields from ${placeFieldsUpdateResult.modifiedCount} selections`
-    );
-
-    console.log("✅ Place market data cleanup completed successfully");
-  } catch (error) {
-    console.error("❌ Error cleaning up place market data:", error.message);
-  }
-};
-
-// Uncomment the line below to run the cleanup function
-// cleanupPlaceMarketData();

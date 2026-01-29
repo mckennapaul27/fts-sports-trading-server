@@ -12,6 +12,7 @@ const googleSheetConfigSchema = new Schema(
 const systemSchema = new Schema(
   {
     name: { type: String, required: true },
+    uniqueName: { type: String, required: true, unique: true, index: true },
     slug: { type: String, required: true, unique: true, index: true },
     description: String,
     isActive: { type: Boolean, default: true },
