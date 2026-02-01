@@ -970,9 +970,9 @@ const changeSubscription = async (req, res) => {
       req.body;
     const userId = req.user.id;
 
-    if (!stripeSubscriptionId || !newProductId || !newPriceId) {
+    if (!stripeSubscriptionId || !newProductId) {
       return res.status(400).json({
-        message: "Subscription ID, product ID, and price ID are required",
+        message: "Subscription ID and product ID are required",
       });
     }
 
@@ -993,6 +993,22 @@ const changeSubscription = async (req, res) => {
           "Cannot change subscription while it is scheduled for cancellation. Please resume first.",
       });
     }
+
+    // Fetch the active price ID from Stripe using the product ID
+    // This ensures we always use the correct, current price
+    const prices = await stripe.prices.list({
+      product: newProductId,
+      active: true,
+      limit: 1,
+    });
+
+    if (prices.data.length === 0) {
+      return res.status(400).json({
+        message: "No active price found for the given product.",
+      });
+    }
+
+    const activePriceId = prices.data[0].id;
 
     // Determine if this is an upgrade or downgrade
     const currentProductId = subscription.productId;
@@ -1015,7 +1031,7 @@ const changeSubscription = async (req, res) => {
       items: [
         {
           id: stripeSubscription.items.data[0].id, // Current subscription item ID
-          price: newPriceId, // New price ID
+          price: activePriceId, // Use the dynamically fetched price ID
         },
       ],
       // Proration behavior: create_prorations for upgrades, none for downgrades
