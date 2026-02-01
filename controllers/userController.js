@@ -966,8 +966,7 @@ const createPortalSession = async (req, res) => {
 
 const changeSubscription = async (req, res) => {
   try {
-    const { stripeSubscriptionId, newProductId, newPriceId, systemSlugs } =
-      req.body;
+    const { stripeSubscriptionId, newProductId, systemSlugs } = req.body;
     const userId = req.user.id;
 
     if (!stripeSubscriptionId || !newProductId) {
@@ -1126,7 +1125,7 @@ const changeSubscription = async (req, res) => {
 
     // Update subscription in database
     subscription.productId = newProductId;
-    subscription.plan = newPriceId; // Store price ID as plan
+    subscription.plan = activePriceId; // Store price ID as plan
     subscription.status = updatedSubscription.status;
     subscription.currentPeriodStart = finalPeriodStart;
     subscription.currentPeriodEnd = finalPeriodEnd;
