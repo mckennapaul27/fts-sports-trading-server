@@ -65,10 +65,28 @@ const updateContactAttributes = async (email, attributes) => {
 const createBrevoContact = async (email, attributes = {}, listIds = []) => {
   const apiInstance = getBrevoApiInstance();
 
+  // Filter out empty string values from attributes (Brevo may reject empty strings)
+  const cleanedAttributes = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value !== null && value !== undefined && value !== "") {
+      cleanedAttributes[key] = value;
+    }
+  }
+
   const createContact = new brevo.CreateContact();
   createContact.email = email;
-  createContact.attributes = attributes;
+  createContact.attributes = cleanedAttributes;
   createContact.listIds = listIds;
+  // Set updateEnabled to true to allow updating existing contacts instead of failing
+  createContact.updateEnabled = true;
+
+  // Log what we're sending to Brevo for debugging
+  console.log("Creating Brevo contact:", {
+    email,
+    attributes: cleanedAttributes,
+    listIds,
+    updateEnabled: true,
+  });
 
   try {
     const data = await apiInstance.createContact(createContact);
@@ -78,10 +96,47 @@ const createBrevoContact = async (email, attributes = {}, listIds = []) => {
     );
     return data;
   } catch (error) {
-    const errorMessage = error.response ? error.response.text : error.message;
-    console.error("Error creating Brevo contact:", errorMessage);
-    console.log("error object", error);
+    // Extract error details from Brevo API response
+    const errorData = error.response?.data || error.body || error.response?.text;
+    const errorMessage = errorData?.message || error.message || "Unknown error";
+    const errorCode = errorData?.code || error.statusCode || error.response?.status;
+    
+    // Log detailed error information
+    console.error("Error creating Brevo contact:", {
+      email,
+      statusCode: errorCode,
+      errorMessage,
+      errorData: errorData ? JSON.stringify(errorData, null, 2) : "No error data",
+      fullError: error.response ? JSON.stringify(error.response, null, 2) : "No response"
+    });
 
+    // Check if error is due to duplicate contact
+    const isDuplicateError =
+      errorCode === 400 &&
+      (errorData?.code === "duplicate_parameter" ||
+        errorData?.message?.includes("already associated") ||
+        errorData?.message?.includes("email is already") ||
+        errorData?.message?.includes("Contact already exist"));
+
+    if (isDuplicateError) {
+      console.log(`Contact with email ${email} already exists in Brevo`);
+      // For duplicate contacts, try to add them to the requested lists instead
+      if (listIds && listIds.length > 0) {
+        try {
+          await addContactToList(listIds[0], [email]);
+          console.log(`Successfully added existing contact ${email} to list ${listIds[0]}`);
+          // Return a success-like response since the contact exists and was added to list
+          return { id: "existing", email };
+        } catch (addToListError) {
+          console.error("Failed to add existing contact to list:", addToListError);
+          // Still throw the original error if adding to list fails
+        }
+      }
+      // If no listIds provided or adding to list failed, throw the duplicate error
+      throw new Error(`Contact with email ${email} already exists in Brevo`);
+    }
+
+    // Send error notification email with better error details
     try {
       await resend.emails.send({
         from: "Fortis Sports Trading <noreply@mail.fortissportstrading.com>",
@@ -90,10 +145,12 @@ const createBrevoContact = async (email, attributes = {}, listIds = []) => {
         html: `
           <h1>Error occurred in createBrevoContact</h1>
           <p><strong>Email:</strong> ${email}</p>
-          <p><strong>Error Message:</strong></p>
-          <pre>${errorMessage}</pre>
-          <p><strong>Full Error:</strong></p>
-          <pre>${JSON.stringify(error, null, 2)}</pre>
+          <p><strong>Status Code:</strong> ${errorCode}</p>
+          <p><strong>Error Message:</strong> ${errorMessage}</p>
+          <p><strong>Error Data:</strong></p>
+          <pre>${errorData ? JSON.stringify(errorData, null, 2) : "No error data"}</pre>
+          <p><strong>Full Error Response:</strong></p>
+          <pre>${error.response ? JSON.stringify(error.response, null, 2) : JSON.stringify(error, null, 2)}</pre>
         `,
       });
       console.log(
