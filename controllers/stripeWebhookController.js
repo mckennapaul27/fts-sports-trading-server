@@ -99,7 +99,7 @@ const handleCheckoutSessionCompleted = async (session) => {
   console.log("    - current_period_start:", currentPeriodStart);
   console.log("    - current_period_end:", currentPeriodEnd);
 
-  const { userId, productId, systemSlugs } = subscription.metadata;
+  const { userId, productId, systemSlugs, isUpgrade, oldSubscriptionId } = subscription.metadata;
 
   if (!userId || !productId || !systemSlugs) {
     console.error(
@@ -109,6 +109,35 @@ const handleCheckoutSessionCompleted = async (session) => {
     throw new Error(
       "User ID or Product ID or System Slugs not found in subscription metadata."
     );
+  }
+
+  // Check if this is an upgrade (new subscription replacing old one)
+  if (isUpgrade === "true" && oldSubscriptionId) {
+    console.log(
+      `🔄 Processing upgrade: New subscription ${subscription.id} replacing ${oldSubscriptionId}`
+    );
+    
+    // Cancel the old subscription immediately
+    try {
+      await stripe.subscriptions.cancel(oldSubscriptionId);
+      console.log(`✅ Cancelled old subscription ${oldSubscriptionId}`);
+      
+      // Mark old subscription as cancelled in database
+      await StripeSubscription.findOneAndUpdate(
+        { stripeSubscriptionId: oldSubscriptionId },
+        { 
+          status: "canceled",
+          canceledAt: new Date(),
+        }
+      );
+    } catch (error) {
+      console.error(
+        `⚠️  Error cancelling old subscription ${oldSubscriptionId}:`,
+        error.message
+      );
+      // Don't fail the webhook if old subscription cancellation fails
+      // The new subscription is still valid
+    }
   }
 
   const existingSubscription = await StripeSubscription.findOne({
@@ -180,20 +209,112 @@ const handleSubscriptionUpdated = async (subscription) => {
     };
 
     // Update plan and productId if available
+    // Check if there's a pending update that just took effect
+    const hasPendingUpdate = existingSubscription.metadata?.pendingProductId;
+    const pendingUpdateApplied = hasPendingUpdate && !subscription.pending_update;
+    
+    console.log("*** [WEBHOOK SUBSCRIPTION UPDATED] Pending change check ***", {
+      subscriptionId: subscription.id,
+      hasPendingUpdate,
+      pendingProductId: existingSubscription.metadata?.pendingProductId,
+      pendingSystemSlugs: existingSubscription.metadata?.pendingSystemSlugs,
+      stripePendingUpdate: subscription.pending_update,
+      pendingUpdateApplied,
+    });
+    
     if (subscription.items?.data?.[0]?.plan) {
       updateData.plan = subscription.items.data[0].plan.id;
       updateData.productId = subscription.items.data[0].plan.product;
+      
+      console.log("*** [WEBHOOK SUBSCRIPTION UPDATED] Plan update ***", {
+        oldProductId: existingSubscription.productId,
+        newProductId: subscription.items.data[0].plan.product,
+        oldPlan: existingSubscription.plan,
+        newPlan: subscription.items.data[0].plan.id,
+      });
+      
+      // If pending update was applied, also update metadata and clear pending values
+      if (pendingUpdateApplied) {
+        console.log(
+          `✅ [WEBHOOK] Pending downgrade from yearly applied for ${subscription.id}, updating productId and systemSlugs`
+        );
+        console.log("*** [WEBHOOK] BEFORE metadata update ***", {
+          currentMetadata: existingSubscription.metadata,
+          stripeSystemSlugs: subscription.metadata?.systemSlugs,
+        });
+        // Update metadata with new values from subscription, removing pending fields
+        const newMetadata = { ...existingSubscription.metadata };
+        newMetadata.productId = subscription.items.data[0].plan.product;
+        if (subscription.metadata?.systemSlugs) {
+          newMetadata.systemSlugs = subscription.metadata.systemSlugs;
+        }
+        // Remove pending fields
+        delete newMetadata.pendingProductId;
+        delete newMetadata.pendingSystemSlugs;
+        delete newMetadata.pendingPlan;
+        updateData.metadata = newMetadata;
+        console.log("*** [WEBHOOK] AFTER metadata update ***", {
+          newMetadata: updateData.metadata,
+        });
+      }
     }
 
-    // Update current period dates if available (these are at root level, not in items)
-    if (subscription.current_period_start) {
-      const date = new Date(subscription.current_period_start * 1000);
+    // Update current period dates - use Stripe as single source of truth
+    // Check both root level and subscription items (dates can be in either location)
+    let periodStart = subscription.current_period_start;
+    let periodEnd = subscription.current_period_end;
+    
+    // If missing at root, check subscription items
+    if (!periodStart || !periodEnd) {
+      const subscriptionItem = subscription.items?.data?.[0];
+      if (subscriptionItem) {
+        if (!periodStart && subscriptionItem.current_period_start) {
+          periodStart = subscriptionItem.current_period_start;
+        }
+        if (!periodEnd && subscriptionItem.current_period_end) {
+          periodEnd = subscriptionItem.current_period_end;
+        }
+      }
+    }
+    
+    // If still missing, retrieve from Stripe (single source of truth)
+    if (!periodStart || !periodEnd) {
+      console.log(
+        `⚠️  Period dates missing in webhook payload for ${subscription.id}, retrieving from Stripe...`
+      );
+      try {
+        const retrievedSubscription = await stripe.subscriptions.retrieve(subscription.id);
+        
+        // Check root level first
+        periodStart = periodStart || retrievedSubscription.current_period_start;
+        periodEnd = periodEnd || retrievedSubscription.current_period_end;
+        
+        // If still missing, check subscription items
+        if ((!periodStart || !periodEnd) && retrievedSubscription.items?.data?.[0]) {
+          const item = retrievedSubscription.items.data[0];
+          periodStart = periodStart || item.current_period_start;
+          periodEnd = periodEnd || item.current_period_end;
+        }
+        
+        console.log(
+          `✅ Retrieved from Stripe: period_start=${periodStart}, period_end=${periodEnd}`
+        );
+      } catch (error) {
+        console.error(
+          `❌ Error retrieving subscription ${subscription.id} from Stripe:`,
+          error
+        );
+      }
+    }
+
+    if (periodStart) {
+      const date = new Date(periodStart * 1000);
       if (!isNaN(date.getTime())) {
         updateData.currentPeriodStart = date;
       }
     }
-    if (subscription.current_period_end) {
-      const date = new Date(subscription.current_period_end * 1000);
+    if (periodEnd) {
+      const date = new Date(periodEnd * 1000);
       if (!isNaN(date.getTime())) {
         updateData.currentPeriodEnd = date;
       }
@@ -223,12 +344,28 @@ const handleSubscriptionUpdated = async (subscription) => {
     );
     console.log(`✅ Subscription updated: ${subscription.id}`);
 
+    // If pending update was applied, we need to update activeSystemIds
+    if (pendingUpdateApplied && updatedSubscription) {
+      try {
+        const userId = updatedSubscription.userId;
+        // Recalculate activeSystemIds now that the downgrade has taken effect
+        await updateUserActiveSystemIds(userId);
+        console.log(`✅ Active system IDs updated after pending downgrade applied for user ${userId}`);
+      } catch (error) {
+        console.error(
+          "Error updating user activeSystemIds after pending downgrade:",
+          error
+        );
+      }
+    }
+
     // Update user's activeSystemIds if systemSlugs in metadata changed
     // Check if metadata.systemSlugs exists and has changed
     if (
       subscription.metadata &&
       subscription.metadata.systemSlugs &&
-      updatedSubscription
+      updatedSubscription &&
+      !pendingUpdateApplied // Don't update twice if we already did above
     ) {
       try {
         const userId = updatedSubscription.userId;

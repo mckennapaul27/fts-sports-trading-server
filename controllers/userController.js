@@ -116,15 +116,64 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 // Initialize Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// Product ID configuration (matches frontend config)
+const PRODUCT_IDS = {
+  test: {
+    ALL_SYSTEMS_YEARLY: "prod_TuX5CZShsGjSV3",
+    ALL_SYSTEMS_MONTHLY: "prod_TuWZ5QV2ICNGoZ",
+    SINGLE_SYSTEM_1: "prod_TuWY39xLvpurco",
+    SINGLE_SYSTEM_2: "prod_TuWYybtPZAmjk9",
+    SINGLE_SYSTEM_3: "prod_TuWYZoWwjZiM5t",
+    SINGLE_SYSTEM_4: "prod_TuWY4ULAcIrsHl",
+  },
+  production: {
+    ALL_SYSTEMS_YEARLY: "prod_TePQBlRJx6Yfol",
+    ALL_SYSTEMS_MONTHLY: "prod_TePPJPkddMweFM",
+    SINGLE_SYSTEM_1: "prod_TePN1px9j4zOuA",
+    SINGLE_SYSTEM_2: "prod_TsiAlPhzZIKfHW",
+    SINGLE_SYSTEM_3: "prod_TsiAjjN0MymyAv",
+    SINGLE_SYSTEM_4: "prod_TsiBgb2TuYyr0p",
+  },
+};
+
 // Promotion configuration
 const ALL_SYSTEMS_YEARLY_PRODUCT_IDS = {
-  test: "prod_TZZdcgHBZ13uZ9",
-  production: "prod_TePQBlRJx6Yfol",
+  test: PRODUCT_IDS.test.ALL_SYSTEMS_YEARLY,
+  production: PRODUCT_IDS.production.ALL_SYSTEMS_YEARLY,
 };
 
 const COUPON_IDS = {
-  test: process.env.STRIPE_PROMOTION_COUPON_ID || "3PTHivK6", // Use env var if set, fallback to hardcoded
+  test: process.env.STRIPE_PROMOTION_COUPON_ID || "16GlRQW9", // Use env var if set, fallback to hardcoded
   production: process.env.STRIPE_PROMOTION_COUPON_ID || "", // Live coupon ID
+};
+
+// Helper functions to check product types
+const isProduction = () => process.env.NODE_ENV === "production";
+
+const getAllSystemsProductIds = () => {
+  const env = isProduction() ? "production" : "test";
+  return [
+    PRODUCT_IDS[env].ALL_SYSTEMS_YEARLY,
+    PRODUCT_IDS[env].ALL_SYSTEMS_MONTHLY,
+  ];
+};
+
+const getSingleSystemProductIds = () => {
+  const env = isProduction() ? "production" : "test";
+  return [
+    PRODUCT_IDS[env].SINGLE_SYSTEM_1,
+    PRODUCT_IDS[env].SINGLE_SYSTEM_2,
+    PRODUCT_IDS[env].SINGLE_SYSTEM_3,
+    PRODUCT_IDS[env].SINGLE_SYSTEM_4,
+  ];
+};
+
+const isAllSystemsProduct = (productId) => {
+  return getAllSystemsProductIds().includes(productId);
+};
+
+const isSingleSystemProduct = (productId) => {
+  return getSingleSystemProductIds().includes(productId);
 };
 
 /**
@@ -133,7 +182,7 @@ const COUPON_IDS = {
  * @returns {string|null} - Coupon ID if promotion should be applied, null otherwise
  */
 const getPromotionCouponId = (productId) => {
-  const isProduction = process.env.NODE_ENV === "production";
+  const prod = isProduction();
 
   // Check if this is All Systems Yearly product
   const isAllSystemsYearly =
@@ -151,7 +200,7 @@ const getPromotionCouponId = (productId) => {
 
   // Testing dates (allows testing now - adjust as needed):
   const promotionStart = new Date("2024-01-01T00:00:00Z"); // Start from past date for testing
-  const promotionEnd = new Date("2026-12-31T23:59:59Z"); // End in future for testing
+  const promotionEnd = new Date("2126-12-31T23:59:59Z"); // End in future for testing
 
   // Production dates (uncomment when ready for production):
   // const promotionStart = new Date("2026-01-01T00:00:00Z");
@@ -164,7 +213,7 @@ const getPromotionCouponId = (productId) => {
   }
 
   // Get the appropriate coupon ID for current environment
-  const couponId = isProduction ? COUPON_IDS.production : COUPON_IDS.test;
+  const couponId = prod ? COUPON_IDS.production : COUPON_IDS.test;
 
   // Only return coupon ID if it's configured (important for production before coupon is created)
   if (!couponId) {
@@ -196,7 +245,7 @@ const getPromotionInfo = (productId) => {
 
   const now = new Date();
   const promotionStart = new Date("2024-01-01T00:00:00Z");
-  const promotionEnd = new Date("2026-12-31T23:59:59Z");
+  const promotionEnd = new Date("2126-12-31T23:59:59Z");
 
   const isPromotionActive = now >= promotionStart && now <= promotionEnd;
 
@@ -285,19 +334,21 @@ const createUser = async (req, res) => {
     });
     await user.save();
 
-    // Add contact to Brevo
-    try {
-      await createBrevoContact(
-        req.body.email.toLowerCase().trim(),
-        {
-          FIRSTNAME: req.body.firstName || "",
-          LASTNAME: req.body.lastName || "",
-        },
-        [4] // Add to list 4
-      );
-    } catch (brevoError) {
-      // Log error but don't fail the user creation process
-      console.error("Failed to add contact to Brevo:", brevoError);
+    // Add contact to Brevo only in production
+    if (isProduction()) {
+      try {
+        await createBrevoContact(
+          req.body.email.toLowerCase().trim(),
+          {
+            FIRSTNAME: req.body.firstName || "",
+            LASTNAME: req.body.lastName || "",
+          },
+          [4] // Add to list 4
+        );
+      } catch (brevoError) {
+        // Log error but don't fail the user creation process
+        console.error("Failed to add contact to Brevo:", brevoError);
+      }
     }
 
     res.status(201).json({
@@ -420,7 +471,7 @@ const deleteUser = async (req, res) => {
 const registerAndSubscribe = async (req, res) => {
   const { email, password, firstName, lastName, productId, systemSlugs } =
     req.body;
-  // console.log("req.body", req.body);
+  console.log("req.body", req.body);
 
   if (!productId) {
     return res.status(400).json({ message: "Product ID is required." });
@@ -450,10 +501,11 @@ const registerAndSubscribe = async (req, res) => {
       lastName,
       role: "user",
     });
-    // console.log("user", user);
+    console.log("user", user);
     await user.save();
 
-    // 3.5. Add contact to Brevo
+    // 3.5. Add contact to Brevo only in production
+    if (isProduction()) {
     try {
       await createBrevoContact(
         email.toLowerCase().trim(),
@@ -464,8 +516,9 @@ const registerAndSubscribe = async (req, res) => {
         [4] // Add to list 4
       );
     } catch (brevoError) {
-      // Log error but don't fail the signup process
-      console.error("Failed to add contact to Brevo:", brevoError);
+          // Log error but don't fail the signup process
+        console.error("Failed to add contact to Brevo:", brevoError);
+      }
     }
 
     // 4. Link the Stripe customer to the user in your database
@@ -473,7 +526,7 @@ const registerAndSubscribe = async (req, res) => {
       userId: user._id,
       stripeCustomerId: stripeCustomer.id,
     });
-    // console.log("customerMapping", customerMapping);
+    console.log("customerMapping", customerMapping);
     await customerMapping.save();
 
     // 5. Find the active price for the given product ID
@@ -482,7 +535,7 @@ const registerAndSubscribe = async (req, res) => {
       active: true,
       limit: 1,
     });
-    // console.log("prices", prices);
+    console.log("prices", prices);
 
     if (prices.data.length === 0) {
       return res
@@ -662,6 +715,31 @@ const getBillingDetails = async (req, res) => {
       subscription.stripeSubscriptionId
     );
 
+    // Check if there's a pending change (scheduled downgrade/upgrade)
+    const hasPendingChange = stripeSubscription.pending_update !== null;
+    const pendingChange = hasPendingChange ? stripeSubscription.pending_update : null;
+    
+    // Check if there's a pending change stored in metadata (for yearly downgrades)
+    const hasPendingInMetadata = subscription.metadata?.pendingProductId;
+    
+    console.log("*** [GET BILLING DETAILS] Pending change detection ***", {
+      subscriptionId: subscription.stripeSubscriptionId,
+      hasPendingChange,
+      hasPendingInMetadata,
+      pendingUpdate: stripeSubscription.pending_update,
+      pendingProductId: subscription.metadata?.pendingProductId,
+      pendingSystemSlugs: subscription.metadata?.pendingSystemSlugs,
+      currentProductId: subscription.productId,
+      currentSystemSlugs: subscription.metadata?.systemSlugs,
+    });
+
+    // For pending changes, use CURRENT productId/systemSlugs (not the pending ones)
+    // This ensures user sees their current access until the change takes effect
+    const currentProductId = subscription.productId; // Current plan, not pending
+    const currentSystemSlugs = subscription.metadata?.systemSlugs 
+      ? JSON.parse(subscription.metadata.systemSlugs)
+      : [];
+
     // Update database subscription with latest period dates from Stripe if available
     if (
       stripeSubscription.current_period_start ||
@@ -681,11 +759,56 @@ const getBillingDetails = async (req, res) => {
       await StripeSubscription.findByIdAndUpdate(subscription._id, updateData);
     }
 
-    // Get price and product details
-    const price = await stripe.prices.retrieve(
-      stripeSubscription.items.data[0].price.id
-    );
-    const product = await stripe.products.retrieve(price.product);
+    // Get price and product details - use CURRENT productId if there's a pending change
+    // Otherwise use what's in Stripe (which might be the new plan if change already applied)
+    let priceIdToUse = stripeSubscription.items.data[0].price.id;
+    let productIdToUse = stripeSubscription.items.data[0].price.product;
+    
+    console.log("*** [GET BILLING DETAILS] Initial product selection ***", {
+      stripeProductId: productIdToUse,
+      stripePriceId: priceIdToUse,
+      willUseCurrent: hasPendingChange || hasPendingInMetadata,
+    });
+    
+    if (hasPendingChange || hasPendingInMetadata) {
+      // Use current productId from database (the plan they still have access to)
+      productIdToUse = currentProductId;
+      console.log("*** [GET BILLING DETAILS] Using CURRENT productId (pending change detected) ***", {
+        currentProductId: currentProductId,
+        stripeProductId: stripeSubscription.items.data[0].price.product,
+      });
+      // Get the price for the current product
+      const currentPrices = await stripe.prices.list({
+        product: currentProductId,
+        active: true,
+        limit: 1,
+      });
+      if (currentPrices.data.length > 0) {
+        priceIdToUse = currentPrices.data[0].id;
+        console.log("*** [GET BILLING DETAILS] Found price for current product ***", {
+          priceId: priceIdToUse,
+          amount: currentPrices.data[0].unit_amount,
+          interval: currentPrices.data[0].recurring?.interval,
+        });
+      } else {
+        console.error("*** [GET BILLING DETAILS] ERROR: No price found for current productId ***", {
+          productId: currentProductId,
+        });
+      }
+    } else {
+      console.log("*** [GET BILLING DETAILS] No pending change, using Stripe productId ***");
+    }
+    
+    const price = await stripe.prices.retrieve(priceIdToUse);
+    const product = await stripe.products.retrieve(productIdToUse);
+    
+    console.log("*** [GET BILLING DETAILS] Final product/price used ***", {
+      productId: productIdToUse,
+      productName: product.name,
+      priceId: priceIdToUse,
+      priceAmount: price.unit_amount,
+      priceInterval: price.recurring?.interval,
+    });
 
     // Get next billing date - only if NOT cancelling
     // If cancelling, don't show next billing date (frontend will show cancellation date instead)
@@ -738,8 +861,69 @@ const getBillingDetails = async (req, res) => {
       status: "paid",
     });
 
-    // Get systems for plan description
+    // Get systems for plan description - use current systemSlugs if pending change
     const systems = await System.find({ isActive: true });
+    
+    // Create a temporary subscription object with current systemSlugs for description
+    const subscriptionForDescription = {
+      ...subscription.toObject(),
+      metadata: {
+        ...subscription.metadata,
+        systemSlugs: JSON.stringify(currentSystemSlugs),
+      },
+    };
+
+    // Get pending change details if exists
+    let pendingChangeInfo = null;
+    if (hasPendingChange || hasPendingInMetadata) {
+      console.log("*** [GET BILLING DETAILS] Building pending change info ***");
+      const pendingProductId = subscription.metadata?.pendingProductId || 
+        (pendingChange?.items?.data?.[0]?.price?.product);
+      const pendingSystemSlugs = subscription.metadata?.pendingSystemSlugs
+        ? JSON.parse(subscription.metadata.pendingSystemSlugs)
+        : [];
+      
+      console.log("*** [GET BILLING DETAILS] Pending change details ***", {
+        pendingProductId,
+        pendingSystemSlugs,
+        fromMetadata: !!subscription.metadata?.pendingProductId,
+        fromStripePendingUpdate: !!pendingChange?.items?.data?.[0]?.price?.product,
+      });
+      
+      if (pendingProductId) {
+        const pendingProduct = await stripe.products.retrieve(pendingProductId);
+        const pendingPrices = await stripe.prices.list({
+          product: pendingProductId,
+          active: true,
+          limit: 1,
+        });
+        
+        pendingChangeInfo = {
+          productId: pendingProductId,
+          productName: pendingProduct.name,
+          systemSlugs: pendingSystemSlugs,
+          effectiveDate: subscription.currentPeriodEnd 
+            ? subscription.currentPeriodEnd.toISOString()
+            : null,
+          description: getPlanDescription(
+            { metadata: { systemSlugs: JSON.stringify(pendingSystemSlugs) } },
+            systems
+          ),
+        };
+        
+        console.log("*** [GET BILLING DETAILS] Pending change info created ***", {
+          productId: pendingChangeInfo.productId,
+          productName: pendingChangeInfo.productName,
+          systemSlugs: pendingChangeInfo.systemSlugs,
+          effectiveDate: pendingChangeInfo.effectiveDate,
+          description: pendingChangeInfo.description,
+        });
+      } else {
+        console.error("*** [GET BILLING DETAILS] ERROR: Pending change detected but no pendingProductId found ***");
+      }
+    } else {
+      console.log("*** [GET BILLING DETAILS] No pending change, pendingChangeInfo = null ***");
+    }
 
     // Format response
     const response = {
@@ -747,12 +931,12 @@ const getBillingDetails = async (req, res) => {
       currentPlan: {
         name: product.name || subscription.plan,
         status: subscription.status,
-        description: getPlanDescription(subscription, systems),
+        description: getPlanDescription(subscriptionForDescription, systems),
         price: (price.unit_amount / 100).toFixed(2),
         currency: price.currency.toUpperCase(),
         period: price.recurring?.interval || "month",
         nextBillingDate: nextBillingDate ? nextBillingDate.toISOString() : null,
-        productId: subscription.productId,
+        productId: currentProductId, // Current productId (what they have access to now)
         priceId: price.id,
         stripeSubscriptionId: subscription.stripeSubscriptionId,
         // Add cancellation fields from database
@@ -763,6 +947,8 @@ const getBillingDetails = async (req, res) => {
         canceledAt: subscription.canceledAt
           ? subscription.canceledAt.toISOString()
           : null,
+        // Add pending change info if exists
+        pendingChange: pendingChangeInfo,
       },
       paymentMethod: paymentMethod
         ? {
@@ -960,11 +1146,272 @@ const createPortalSession = async (req, res) => {
   }
 };
 
-// @desc    Change subscription (upgrade/downgrade)
-// @route   POST /api/users/change-subscription
-// @access  Private
+// Helper function to update user's activeSystemIds
+const updateUserActiveSystemIds = async (userId) => {
+  try {
+    const System = require("../models/System");
+    const activeSubscriptions = await StripeSubscription.find({
+      userId,
+      status: { $in: ["active", "trialing"] },
+    });
 
-const changeSubscription = async (req, res) => {
+    const allSystemSlugs = new Set();
+    for (const sub of activeSubscriptions) {
+      if (sub.metadata && sub.metadata.systemSlugs) {
+        try {
+          const parsed = JSON.parse(sub.metadata.systemSlugs);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((slug) => allSystemSlugs.add(slug));
+          }
+        } catch (e) {
+          console.error(
+            `Error parsing systemSlugs for subscription ${sub.stripeSubscriptionId}:`,
+            e
+          );
+        }
+      }
+    }
+
+    const systems = await System.find({
+      slug: { $in: Array.from(allSystemSlugs) },
+    });
+
+    const user = await User.findById(userId);
+    if (user) {
+      user.activeSystemIds = systems.map((system) => system._id);
+      await user.save();
+      console.log(
+        `User ${userId} activeSystemIds updated:`,
+        user.activeSystemIds
+      );
+    }
+  } catch (error) {
+    console.error("Error updating user activeSystemIds:", error);
+    throw error;
+  }
+};
+
+// Helper function to calculate unused time credit (in pence)
+const calculateUnusedTimeCredit = async (stripeSubscription) => {
+  const currentPeriodStart = stripeSubscription.current_period_start;
+  const currentPeriodEnd = stripeSubscription.current_period_end;
+  const now = Math.floor(Date.now() / 1000);
+  
+  // Calculate remaining time in current period (in seconds)
+  const remainingSeconds = currentPeriodEnd - now;
+  const totalPeriodSeconds = currentPeriodEnd - currentPeriodStart;
+  
+  if (remainingSeconds <= 0 || totalPeriodSeconds <= 0) {
+    return 0;
+  }
+  
+  // Get the price amount
+  const priceAmount = stripeSubscription.items.data[0].price.unit_amount;
+  if (!priceAmount) {
+    return 0;
+  }
+  
+  // Calculate prorated credit
+  const creditAmount = Math.floor((priceAmount * remainingSeconds) / totalPeriodSeconds);
+  
+  return creditAmount;
+};
+
+// @desc    Downgrade to Monthly Single System
+// @route   POST /api/users/change-subscription (with changeType: "downgradeToMonthlySingleSystem")
+// @access  Private
+const downgradeToMonthlySingleSystem = async (req, res) => {
+  try {
+    const { stripeSubscriptionId, newProductId, systemSlugs } = req.body;
+    const userId = req.user.id;
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] req.body ***", req.body);
+
+    if (!stripeSubscriptionId || !newProductId) {
+      return res.status(400).json({
+        message: "Subscription ID and product ID are required",
+      });
+    }
+
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] subscription (before) ***", {
+      _id: subscription?._id,
+      productId: subscription?.productId,
+      plan: subscription?.plan,
+      status: subscription?.status,
+      currentPeriodStart: subscription?.currentPeriodStart,
+      currentPeriodEnd: subscription?.currentPeriodEnd,
+      metadata: subscription?.metadata,
+    });
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    if (subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message:
+          "Cannot change subscription while it is scheduled for cancellation. Please resume first.",
+      });
+    }
+
+    // Get price for new product
+    const prices = await stripe.prices.list({
+      product: newProductId,
+      active: true,
+      limit: 1,
+    });
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] prices ***", {
+      found: prices.data.length > 0,
+      priceId: prices.data[0]?.id,
+      amount: prices.data[0]?.unit_amount,
+      currency: prices.data[0]?.currency,
+    });
+
+    if (prices.data.length === 0) {
+      return res.status(400).json({
+        message: "No active price found for the given product.",
+      });
+    }
+
+    const activePriceId = prices.data[0].id;
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      stripeSubscriptionId
+    );
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] stripeSubscription (before) ***", {
+      id: stripeSubscription.id,
+      status: stripeSubscription.status,
+      current_period_start: stripeSubscription.current_period_start,
+      current_period_end: stripeSubscription.current_period_end,
+      billing_cycle_anchor: stripeSubscription.billing_cycle_anchor,
+      plan: {
+        id: stripeSubscription.items.data[0]?.price?.id,
+        product: stripeSubscription.items.data[0]?.price?.product,
+        amount: stripeSubscription.items.data[0]?.price?.unit_amount,
+        interval: stripeSubscription.items.data[0]?.price?.recurring?.interval,
+      },
+      metadata: stripeSubscription.metadata,
+    });
+
+    // Downgrade: schedule for period end, no payment needed
+    // Same interval (monthly to monthly), so use billing_cycle_anchor: "unchanged"
+    const updateParams = {
+      items: [
+        {
+          id: stripeSubscription.items.data[0].id,
+          price: activePriceId,
+        },
+      ],
+      proration_behavior: "none", // No proration for downgrades
+      billing_cycle_anchor: "unchanged", // Same interval, schedule for period end
+      metadata: {
+        userId: userId.toString(),
+        productId: newProductId,
+        systemSlugs: JSON.stringify(systemSlugs || []),
+      },
+    };
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] Stripe update params ***", updateParams);
+
+    const updatedSubscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      updateParams
+    );
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] Stripe update response (full) ***", updatedSubscription);
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] Stripe update response (key fields) ***", {
+      id: updatedSubscription.id,
+      status: updatedSubscription.status,
+      current_period_start: updatedSubscription.current_period_start,
+      current_period_end: updatedSubscription.current_period_end,
+      billing_cycle_anchor: updatedSubscription.billing_cycle_anchor,
+      plan: {
+        id: updatedSubscription.items.data[0]?.price?.id,
+        product: updatedSubscription.items.data[0]?.price?.product,
+        amount: updatedSubscription.items.data[0]?.price?.unit_amount,
+        interval: updatedSubscription.items.data[0]?.price?.recurring?.interval,
+      },
+      metadata: updatedSubscription.metadata,
+      pending_update: updatedSubscription.pending_update, // Important: shows if change is scheduled
+    });
+
+    // Update database - validate dates before setting
+    subscription.productId = newProductId;
+    subscription.plan = activePriceId;
+    subscription.status = updatedSubscription.status;
+    
+    // Validate and set currentPeriodStart
+    if (
+      updatedSubscription.current_period_start &&
+      typeof updatedSubscription.current_period_start === "number"
+    ) {
+      subscription.currentPeriodStart = new Date(
+        updatedSubscription.current_period_start * 1000
+      );
+    }
+    
+    // Validate and set currentPeriodEnd
+    if (
+      updatedSubscription.current_period_end &&
+      typeof updatedSubscription.current_period_end === "number"
+    ) {
+      subscription.currentPeriodEnd = new Date(
+        updatedSubscription.current_period_end * 1000
+      );
+    }
+    
+    subscription.metadata = {
+      ...subscription.metadata,
+      productId: newProductId,
+      systemSlugs: JSON.stringify(systemSlugs || []),
+    };
+    await subscription.save();
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] subscription (after save) ***", {
+      productId: subscription.productId,
+      plan: subscription.plan,
+      status: subscription.status,
+      metadata: subscription.metadata,
+      currentPeriodStart: subscription.currentPeriodStart,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+    });
+
+    await updateUserActiveSystemIds(userId);
+
+    const effectiveDate = updatedSubscription.current_period_end
+      ? new Date(updatedSubscription.current_period_end * 1000).toISOString()
+      : new Date().toISOString();
+
+    console.log("*** [DOWNGRADE TO SINGLE SYSTEM] Response ***", {
+      success: true,
+      effectiveDate: effectiveDate,
+      isChangingInterval: false,
+    });
+
+    res.json({
+      success: true,
+      message: "Subscription change scheduled for end of current billing period",
+      effectiveDate: effectiveDate,
+      isChangingInterval: false, // Same interval (monthly to monthly)
+    });
+  } catch (error) {
+    console.error("Error downgrading to monthly single system:", error);
+    res.status(500).json({
+      message: error.message || "Failed to downgrade subscription",
+    });
+  }
+};
+
+// @desc    Downgrade to All Systems Monthly
+// @route   POST /api/users/change-subscription (with changeType: "downgradeToAllSystemsMonthly")
+// @access  Private
+const downgradeToAllSystemsMonthly = async (req, res) => {
   try {
     const { stripeSubscriptionId, newProductId, systemSlugs } = req.body;
     const userId = req.user.id;
@@ -975,7 +1422,6 @@ const changeSubscription = async (req, res) => {
       });
     }
 
-    // Verify the subscription belongs to this user
     const subscription = await StripeSubscription.findOne({
       userId,
       stripeSubscriptionId,
@@ -985,7 +1431,6 @@ const changeSubscription = async (req, res) => {
       return res.status(404).json({ message: "Subscription not found" });
     }
 
-    // Check if subscription is cancelled
     if (subscription.cancelAtPeriodEnd) {
       return res.status(400).json({
         message:
@@ -993,8 +1438,7 @@ const changeSubscription = async (req, res) => {
       });
     }
 
-    // Fetch the active price ID from Stripe using the product ID
-    // This ensures we always use the correct, current price
+    // Get price for new product
     const prices = await stripe.prices.list({
       product: newProductId,
       active: true,
@@ -1008,35 +1452,20 @@ const changeSubscription = async (req, res) => {
     }
 
     const activePriceId = prices.data[0].id;
-
-    // Determine if this is an upgrade or downgrade
-    const currentProductId = subscription.productId;
-    const isUpgrade =
-      newProductId === "prod_TZZdcgHBZ13uZ9" || // All Systems Yearly
-      (newProductId === "prod_TZZcEMlv2cNNWl" && // All Systems Monthly
-        [
-          "prod_TZZbjLqthXdjxx",
-          "prod_TZZcUfjAmtJfkg",
-          "prod_TZZcuPVww3QyDm",
-        ].includes(currentProductId)); // From Single System
-
-    // Get current subscription from Stripe
     const stripeSubscription = await stripe.subscriptions.retrieve(
       stripeSubscriptionId
     );
 
-    // Update the subscription item with new price
+    // Downgrade: schedule for period end (changing from yearly to monthly)
     await stripe.subscriptions.update(stripeSubscriptionId, {
       items: [
         {
-          id: stripeSubscription.items.data[0].id, // Current subscription item ID
-          price: activePriceId, // Use the dynamically fetched price ID
+          id: stripeSubscription.items.data[0].id,
+          price: activePriceId,
         },
       ],
-      // Proration behavior: create_prorations for upgrades, none for downgrades
-      proration_behavior: isUpgrade ? "create_prorations" : "none",
-      // For downgrades, schedule for period end. For upgrades, immediate.
-      billing_cycle_anchor: isUpgrade ? "now" : "unchanged",
+      proration_behavior: "none",
+      // Omit billing_cycle_anchor - Stripe will schedule for period end when interval changes
       metadata: {
         userId: userId.toString(),
         productId: newProductId,
@@ -1044,174 +1473,705 @@ const changeSubscription = async (req, res) => {
       },
     });
 
-    // Retrieve the updated subscription to get the current period dates
     const updatedSubscription = await stripe.subscriptions.retrieve(
       stripeSubscriptionId
     );
 
-    // Validate and convert dates from Stripe response
-    // Note: current_period_start and current_period_end should be present after retrieval
-    const currentPeriodStart =
-      updatedSubscription.current_period_start &&
-      typeof updatedSubscription.current_period_start === "number"
-        ? new Date(updatedSubscription.current_period_start * 1000)
-        : null;
-
-    const currentPeriodEnd =
-      updatedSubscription.current_period_end &&
-      typeof updatedSubscription.current_period_end === "number"
-        ? new Date(updatedSubscription.current_period_end * 1000)
-        : null;
-
-    // If dates are still not available, calculate from billing_cycle_anchor and plan interval
-    let finalPeriodStart = currentPeriodStart;
-    let finalPeriodEnd = currentPeriodEnd;
-
-    if (!finalPeriodStart || isNaN(finalPeriodStart.getTime())) {
-      // Fallback: use billing_cycle_anchor
-      if (
-        updatedSubscription.billing_cycle_anchor &&
-        typeof updatedSubscription.billing_cycle_anchor === "number"
-      ) {
-        finalPeriodStart = new Date(
-          updatedSubscription.billing_cycle_anchor * 1000
-        );
-      } else {
-        // Last resort: use current date
-        finalPeriodStart = new Date();
-      }
-    }
-
-    if (!finalPeriodEnd || isNaN(finalPeriodEnd.getTime())) {
-      // Calculate period end based on plan interval
-      const plan = updatedSubscription.items.data[0]?.price;
-      if (plan && finalPeriodStart) {
-        const interval = plan.interval; // 'month' or 'year'
-        const intervalCount = plan.interval_count || 1;
-
-        finalPeriodEnd = new Date(finalPeriodStart);
-        if (interval === "month") {
-          finalPeriodEnd.setMonth(finalPeriodEnd.getMonth() + intervalCount);
-        } else if (interval === "year") {
-          finalPeriodEnd.setFullYear(
-            finalPeriodEnd.getFullYear() + intervalCount
-          );
-        } else if (interval === "day") {
-          finalPeriodEnd.setDate(finalPeriodEnd.getDate() + intervalCount);
-        } else if (interval === "week") {
-          finalPeriodEnd.setDate(finalPeriodEnd.getDate() + intervalCount * 7);
-        }
-      } else {
-        // Last resort: use current date + 1 month
-        finalPeriodEnd = new Date(finalPeriodStart || new Date());
-        finalPeriodEnd.setMonth(finalPeriodEnd.getMonth() + 1);
-      }
-    }
-
-    // Final validation
-    if (!finalPeriodStart || isNaN(finalPeriodStart.getTime())) {
-      console.error("Could not determine valid currentPeriodStart");
-      return res.status(500).json({
-        message: "Failed to update subscription: invalid period start date",
-      });
-    }
-
-    if (!finalPeriodEnd || isNaN(finalPeriodEnd.getTime())) {
-      console.error("Could not determine valid currentPeriodEnd");
-      return res.status(500).json({
-        message: "Failed to update subscription: invalid period end date",
-      });
-    }
-
-    // Update subscription in database
+    // Update database
     subscription.productId = newProductId;
-    subscription.plan = activePriceId; // Store price ID as plan
+    subscription.plan = activePriceId;
     subscription.status = updatedSubscription.status;
-    subscription.currentPeriodStart = finalPeriodStart;
-    subscription.currentPeriodEnd = finalPeriodEnd;
-
-    // Clear cancellation fields if upgrading (since upgrade is immediate)
-    if (isUpgrade) {
-      subscription.cancelAtPeriodEnd = false;
-      subscription.cancelAt = null;
-      subscription.canceledAt = null;
-    }
-
-    // Update metadata with new system slugs
+    subscription.currentPeriodStart = new Date(
+      updatedSubscription.current_period_start * 1000
+    );
+    subscription.currentPeriodEnd = new Date(
+      updatedSubscription.current_period_end * 1000
+    );
     subscription.metadata = {
       ...subscription.metadata,
       productId: newProductId,
       systemSlugs: JSON.stringify(systemSlugs || []),
     };
-
     await subscription.save();
 
-    // Update user's activeSystemIds based on all active subscriptions
-    // This ensures we aggregate all subscriptions if user has multiple
-    // The webhook will also update this, but we update now for immediate effect
-    try {
-      const StripeSubscription = require("../models/StripeSubscription");
-      const System = require("../models/System");
+    await updateUserActiveSystemIds(userId);
 
-      // Find all active subscriptions for the user
-      const activeSubscriptions = await StripeSubscription.find({
-        userId,
-        status: { $in: ["active", "trialing"] },
+    res.json({
+      success: true,
+      message: "Subscription change scheduled for end of current billing period",
+      effectiveDate: new Date(
+        updatedSubscription.current_period_end * 1000
+      ).toISOString(),
+      isChangingInterval: true,
+    });
+  } catch (error) {
+    console.error("Error downgrading to all systems monthly:", error);
+    res.status(500).json({
+      message: error.message || "Failed to downgrade subscription",
+    });
+  }
+};
+
+// @desc    Downgrade from All Systems Yearly
+// @route   POST /api/users/change-subscription (with changeType: "downgradeFromAllSystemsYearly")
+// @access  Private
+// Handles downgrades from yearly to either single system monthly or all systems monthly
+// User retains access until billing cycle ends (no immediate restriction)
+const downgradeFromAllSystemsYearly = async (req, res) => {
+  try {
+    const { stripeSubscriptionId, newProductId, systemSlugs } = req.body;
+    const userId = req.user.id;
+
+    console.log("*** [DOWNGRADE FROM YEARLY] req.body ***", req.body);
+
+    if (!stripeSubscriptionId || !newProductId) {
+      return res.status(400).json({
+        message: "Subscription ID and product ID are required",
+      });
+    }
+
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+
+    console.log("*** [DOWNGRADE FROM YEARLY] subscription (before) ***", {
+      _id: subscription?._id,
+      productId: subscription?.productId,
+      plan: subscription?.plan,
+      status: subscription?.status,
+      currentPeriodStart: subscription?.currentPeriodStart,
+      currentPeriodEnd: subscription?.currentPeriodEnd,
+      metadata: subscription?.metadata,
+    });
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    if (subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message:
+          "Cannot change subscription while it is scheduled for cancellation. Please resume first.",
+      });
+    }
+
+    // Get price for new product
+    const prices = await stripe.prices.list({
+      product: newProductId,
+      active: true,
+      limit: 1,
+    });
+
+    console.log("*** [DOWNGRADE FROM YEARLY] prices ***", {
+      found: prices.data.length > 0,
+      priceId: prices.data[0]?.id,
+      amount: prices.data[0]?.unit_amount,
+      currency: prices.data[0]?.currency,
+      interval: prices.data[0]?.recurring?.interval,
+    });
+
+    if (prices.data.length === 0) {
+      return res.status(400).json({
+        message: "No active price found for the given product.",
+      });
+    }
+
+    const activePriceId = prices.data[0].id;
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      stripeSubscriptionId
+    );
+
+    console.log("*** [DOWNGRADE FROM YEARLY] stripeSubscription (before) ***", {
+      id: stripeSubscription.id,
+      status: stripeSubscription.status,
+      current_period_start: stripeSubscription.current_period_start,
+      current_period_end: stripeSubscription.current_period_end,
+      billing_cycle_anchor: stripeSubscription.billing_cycle_anchor,
+      plan: {
+        id: stripeSubscription.items.data[0]?.price?.id,
+        product: stripeSubscription.items.data[0]?.price?.product,
+        amount: stripeSubscription.items.data[0]?.price?.unit_amount,
+        interval: stripeSubscription.items.data[0]?.price?.recurring?.interval,
+      },
+      metadata: stripeSubscription.metadata,
+    });
+
+    // Downgrade from yearly: schedule for period end, no proration, no immediate restriction
+    // Changing interval (yearly to monthly), so omit billing_cycle_anchor - Stripe schedules for period end
+    const updateParams = {
+      items: [
+        {
+          id: stripeSubscription.items.data[0].id,
+          price: activePriceId,
+        },
+      ],
+      proration_behavior: "none", // No proration for downgrades
+      // Omit billing_cycle_anchor - Stripe will schedule for period end when interval changes
+      metadata: {
+        userId: userId.toString(),
+        productId: newProductId,
+        systemSlugs: JSON.stringify(systemSlugs || []),
+      },
+    };
+
+    console.log("*** [DOWNGRADE FROM YEARLY] Stripe update params ***", updateParams);
+
+    const updatedSubscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      updateParams
+    );
+
+    console.log("*** [DOWNGRADE FROM YEARLY] Stripe update response (full) ***", updatedSubscription);
+    console.log("*** [DOWNGRADE FROM YEARLY] Stripe update response (key fields) ***", {
+      id: updatedSubscription.id,
+      status: updatedSubscription.status,
+      current_period_start: updatedSubscription.current_period_start,
+      current_period_end: updatedSubscription.current_period_end,
+      billing_cycle_anchor: updatedSubscription.billing_cycle_anchor,
+      plan: {
+        id: updatedSubscription.items.data[0]?.price?.id,
+        product: updatedSubscription.items.data[0]?.price?.product,
+        amount: updatedSubscription.items.data[0]?.price?.unit_amount,
+        interval: updatedSubscription.items.data[0]?.price?.recurring?.interval,
+      },
+      metadata: updatedSubscription.metadata,
+      pending_update: updatedSubscription.pending_update, // Important: shows if change is scheduled
+      pending_update_details: updatedSubscription.pending_update ? {
+        expires_at: updatedSubscription.pending_update.expires_at,
+        subscription_items: updatedSubscription.pending_update.subscription_items,
+      } : null,
+    });
+
+    // For yearly downgrades, DO NOT update productId/systemSlugs in database yet
+    // User retains access until period ends. Store pending change in metadata.
+    // The webhook will update productId/systemSlugs when the change actually takes effect
+    console.log("*** [DOWNGRADE FROM YEARLY] BEFORE metadata update ***", {
+      current_productId: subscription.productId,
+      current_plan: subscription.plan,
+      current_systemSlugs: subscription.metadata?.systemSlugs,
+      new_productId: newProductId,
+      new_systemSlugs: systemSlugs,
+    });
+    
+    subscription.metadata = {
+      ...subscription.metadata,
+      // Keep current productId and systemSlugs for access control
+      // Store pending values separately
+      pendingProductId: newProductId,
+      pendingSystemSlugs: JSON.stringify(systemSlugs || []),
+      pendingPlan: activePriceId,
+    };
+    subscription.status = updatedSubscription.status;
+    await subscription.save();
+
+    console.log("*** [DOWNGRADE FROM YEARLY] subscription (after save) ***", {
+      productId: subscription.productId, // Still the old yearly productId
+      plan: subscription.plan, // Still the old yearly plan
+      status: subscription.status,
+      metadata: subscription.metadata,
+      currentPeriodStart: subscription.currentPeriodStart,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+      pendingProductId: subscription.metadata.pendingProductId,
+      pendingSystemSlugs: subscription.metadata.pendingSystemSlugs,
+      pendingPlan: subscription.metadata.pendingPlan,
+    });
+    
+    // Verify productId was NOT changed
+    if (subscription.productId === newProductId) {
+      console.error("*** [DOWNGRADE FROM YEARLY] ERROR: productId was updated! It should remain as the current plan. ***");
+    } else {
+      console.log("*** [DOWNGRADE FROM YEARLY] ✓ productId correctly NOT updated, remains as current plan ***");
+    }
+
+    // DO NOT call updateUserActiveSystemIds - keep current access until period ends
+    console.log("*** [DOWNGRADE FROM YEARLY] Skipping updateUserActiveSystemIds - user retains current access until period ends ***");
+
+    const effectiveDate = updatedSubscription.current_period_end
+      ? new Date(updatedSubscription.current_period_end * 1000).toISOString()
+      : new Date().toISOString();
+
+    console.log("*** [DOWNGRADE FROM YEARLY] Response ***", {
+      success: true,
+      effectiveDate: effectiveDate,
+      isChangingInterval: true,
+    });
+
+    res.json({
+      success: true,
+      message: "Subscription change scheduled for end of current billing period. You will retain access until then.",
+      effectiveDate: effectiveDate,
+      isChangingInterval: true, // Changing from yearly to monthly
+    });
+  } catch (error) {
+    console.error("Error downgrading from all systems yearly:", error);
+    res.status(500).json({
+      message: error.message || "Failed to downgrade subscription",
+    });
+  }
+};
+
+// @desc    Upgrade to All Systems Monthly
+// @route   POST /api/users/change-subscription (with changeType: "upgradeToAllSystemsMonthly")
+// @access  Private
+const upgradeToAllSystemsMonthly = async (req, res) => {
+  try {
+    const { stripeSubscriptionId, newProductId, systemSlugs } = req.body;
+    console.log("*** req.body ***", req.body);
+    const userId = req.user.id;
+
+    if (!stripeSubscriptionId || !newProductId) {
+      return res.status(400).json({
+        message: "Subscription ID and product ID are required",
+      });
+    }
+
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+    console.log("*** subscription ***", subscription);
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    if (subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message:
+          "Cannot change subscription while it is scheduled for cancellation. Please resume first.",
+      });
+    }
+
+    // Get price for new product
+    const prices = await stripe.prices.list({
+      product: newProductId,
+      active: true,
+      limit: 1,
+    });
+    console.log("*** prices ***", prices);
+
+    if (prices.data.length === 0) {
+      return res.status(400).json({
+        message: "No active price found for the given product.",
+      });
+    }
+
+    const activePriceId = prices.data[0].id;
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      stripeSubscriptionId
+    );
+    console.log("*** stripeSubscription ***", stripeSubscription);
+
+    // // Upgrade: immediate, with proration to credit unused single system time
+    const updatedSubscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      {
+        items: [
+          {
+            id: stripeSubscription.items.data[0].id,
+            price: activePriceId,
+          },
+        ],
+        proration_behavior: "create_prorations", // Credit unused time
+        billing_cycle_anchor: "unchanged", // Same interval (monthly)
+        metadata: {
+          userId: userId.toString(),
+          productId: newProductId,
+          systemSlugs: JSON.stringify(systemSlugs || []),
+        },
+      }
+    );
+    console.log("*** updatedSubscription ***", updatedSubscription);
+
+    // Update database immediately - validate dates before setting
+    subscription.productId = newProductId;
+    subscription.plan = activePriceId;
+    subscription.status = updatedSubscription.status;
+    
+    // Validate and set currentPeriodStart - only if Stripe provides it
+    if (
+      updatedSubscription.current_period_start &&
+      typeof updatedSubscription.current_period_start === "number"
+    ) {
+      subscription.currentPeriodStart = new Date(
+        updatedSubscription.current_period_start * 1000
+      );
+    }
+    // If not provided, keep existing value (don't set to invalid date)
+    
+    // Validate and set currentPeriodEnd - only if Stripe provides it
+    if (
+      updatedSubscription.current_period_end &&
+      typeof updatedSubscription.current_period_end === "number"
+    ) {
+      subscription.currentPeriodEnd = new Date(
+        updatedSubscription.current_period_end * 1000
+      );
+    }
+    // If not provided, keep existing value (don't set to invalid date)
+    
+    subscription.metadata = {
+      ...subscription.metadata,
+      productId: newProductId,
+      systemSlugs: JSON.stringify(systemSlugs || []),
+    };
+    await subscription.save();
+    console.log("*** subscription (after save) ***", {
+      productId: subscription.productId,
+      plan: subscription.plan,
+      status: subscription.status,
+      metadata: subscription.metadata,
+      currentPeriodStart: subscription.currentPeriodStart,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+    });
+
+    await updateUserActiveSystemIds(userId);
+
+    // When upgrading with proration, Stripe creates pending invoice items
+    // We need to create and finalize an invoice to charge the customer immediately
+    try {
+      // Store return URL in metadata for reference (Stripe hosted invoices don't support redirects)
+      const returnUrl = `${process.env.FRONTEND_URL}/dashboard/payment/success`;
+      
+      // Create an invoice for the pending invoice items (proration charges)
+      const invoice = await stripe.invoices.create({
+        customer: stripeSubscription.customer,
+        subscription: stripeSubscriptionId,
+        auto_advance: true, // Automatically finalize and attempt payment
+        metadata: {
+          returnUrl: returnUrl,
+          upgradeType: "upgradeToAllSystemsMonthly",
+        },
       });
 
-      // Collect all system slugs from all active subscriptions
-      const allSystemSlugs = new Set();
-      for (const sub of activeSubscriptions) {
-        if (sub.metadata && sub.metadata.systemSlugs) {
-          try {
-            const parsed = JSON.parse(sub.metadata.systemSlugs);
-            if (Array.isArray(parsed)) {
-              parsed.forEach((slug) => allSystemSlugs.add(slug));
-            }
-          } catch (e) {
-            // If parsing fails, skip this subscription's systems
-            console.error(
-              `Error parsing systemSlugs for subscription ${sub.stripeSubscriptionId}:`,
-              e
-            );
-          }
+      console.log("*** created invoice ***", invoice);
+
+      // If invoice needs payment, finalize it and get payment URL
+      if (invoice.status === "draft") {
+        const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
+        console.log("*** finalized invoice ***", finalizedInvoice);
+
+        if (finalizedInvoice.status === "open" && finalizedInvoice.amount_due > 0) {
+          // Note: Stripe's hosted invoice pages don't support automatic redirects
+          // User will need to navigate back manually after payment
+          return res.json({
+            url: finalizedInvoice.hosted_invoice_url,
+            requiresCheckout: true,
+            message: "Redirecting to complete payment. After payment, please return to your dashboard.",
+            returnUrl: returnUrl, // Include in response so frontend can show a message
+          });
         }
       }
 
-      // Look up all systems by their slugs
-      const systems = await System.find({
-        slug: { $in: Array.from(allSystemSlugs) },
-      });
-
-      // Update user's activeSystemIds
-      const user = await User.findById(userId);
-      if (user) {
-        user.activeSystemIds = systems.map((system) => system._id);
-        await user.save();
-        console.log(
-          `User ${userId} activeSystemIds updated in changeSubscription:`,
-          user.activeSystemIds
-        );
+      // If invoice is already paid or has no amount due, upgrade is complete
+      if (invoice.status === "paid" || invoice.amount_due === 0) {
+        return res.json({
+          success: true,
+          message: "Subscription upgraded successfully",
+          effectiveDate: new Date().toISOString(),
+        });
       }
-    } catch (error) {
-      console.error(
-        "Error updating user activeSystemIds in changeSubscription:",
-        error
-      );
-      // Don't fail the request if this fails, but log it
+    } catch (invoiceError) {
+      console.error("Error creating invoice for proration:", invoiceError);
+      // If invoice creation fails, still return success since subscription is updated
+      // The proration will be included in the next billing cycle
     }
 
     res.json({
       success: true,
-      message: isUpgrade
-        ? "Subscription upgraded successfully"
-        : "Subscription change scheduled successfully",
-      effectiveDate: isUpgrade
-        ? new Date().toISOString()
-        : finalPeriodEnd.toISOString(),
+      message: "Subscription upgraded successfully",
+      effectiveDate: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Error changing subscription:", error);
+    console.error("Error upgrading to all systems monthly:", error);
+    res.status(500).json({
+      message: error.message || "Failed to upgrade subscription",
+    });
+  }
+};
+
+// @desc    Upgrade to All Systems Yearly
+// @route   POST /api/users/change-subscription (with changeType: "upgradeToAllSystemsYearly")
+// @access  Private
+const upgradeToAllSystemsYearly = async (req, res) => {
+  try {
+    const { stripeSubscriptionId, newProductId, systemSlugs } = req.body;
+    const userId = req.user.id;
+
+    console.log("*** [UPGRADE TO YEARLY] req.body ***", req.body);
+
+    if (!stripeSubscriptionId || !newProductId) {
+      return res.status(400).json({
+        message: "Subscription ID and product ID are required",
+      });
+    }
+
+    const subscription = await StripeSubscription.findOne({
+      userId,
+      stripeSubscriptionId,
+    });
+
+    console.log("*** [UPGRADE TO YEARLY] subscription (before) ***", {
+      _id: subscription?._id,
+      productId: subscription?.productId,
+      plan: subscription?.plan,
+      status: subscription?.status,
+      currentPeriodStart: subscription?.currentPeriodStart,
+      currentPeriodEnd: subscription?.currentPeriodEnd,
+      metadata: subscription?.metadata,
+    });
+
+    if (!subscription) {
+      return res.status(404).json({ message: "Subscription not found" });
+    }
+
+    if (subscription.cancelAtPeriodEnd) {
+      return res.status(400).json({
+        message:
+          "Cannot change subscription while it is scheduled for cancellation. Please resume first.",
+      });
+    }
+
+    // Get price for new product
+    const prices = await stripe.prices.list({
+      product: newProductId,
+      active: true,
+      limit: 1,
+    });
+
+    console.log("*** [UPGRADE TO YEARLY] prices ***", {
+      found: prices.data.length > 0,
+      priceId: prices.data[0]?.id,
+      amount: prices.data[0]?.unit_amount,
+      currency: prices.data[0]?.currency,
+      interval: prices.data[0]?.recurring?.interval,
+    });
+
+    if (prices.data.length === 0) {
+      return res.status(400).json({
+        message: "No active price found for the given product.",
+      });
+    }
+
+    const activePriceId = prices.data[0].id;
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      stripeSubscriptionId
+    );
+
+    console.log("*** [UPGRADE TO YEARLY] stripeSubscription (before) ***", {
+      id: stripeSubscription.id,
+      status: stripeSubscription.status,
+      current_period_start: stripeSubscription.current_period_start,
+      current_period_end: stripeSubscription.current_period_end,
+      billing_cycle_anchor: stripeSubscription.billing_cycle_anchor,
+      plan: {
+        id: stripeSubscription.items.data[0]?.price?.id,
+        product: stripeSubscription.items.data[0]?.price?.product,
+        amount: stripeSubscription.items.data[0]?.price?.unit_amount,
+        interval: stripeSubscription.items.data[0]?.price?.recurring?.interval,
+      },
+      metadata: stripeSubscription.metadata,
+    });
+
+    // Get coupon ID
+    const couponId = getPromotionCouponId(newProductId);
+    console.log("*** [UPGRADE TO YEARLY] couponId ***", couponId);
+
+    // Upgrade: immediate, with Stripe's automatic proration + coupon
+    // Changing intervals (monthly to yearly), so use billing_cycle_anchor: "now"
+    const updateParams = {
+      items: [
+        {
+          id: stripeSubscription.items.data[0].id,
+          price: activePriceId,
+        },
+      ],
+      proration_behavior: "create_prorations", // Stripe automatically calculates and credits unused time
+      billing_cycle_anchor: "now", // Start new yearly cycle immediately (changing intervals)
+      metadata: {
+        userId: userId.toString(),
+        productId: newProductId,
+        systemSlugs: JSON.stringify(systemSlugs || []),
+      },
+    };
+
+    if (couponId) {
+      try {
+        const coupon = await stripe.coupons.retrieve(couponId);
+        if (coupon.valid) {
+          updateParams.discounts = [{ coupon: couponId }];
+          console.log(
+            `*** [UPGRADE TO YEARLY] Applying coupon ${couponId} - 50% off yearly plan`
+          );
+        }
+      } catch (couponError) {
+        console.error(
+          `*** [UPGRADE TO YEARLY] Error verifying coupon ${couponId}:`,
+          couponError.message
+        );
+      }
+    }
+
+    console.log("*** [UPGRADE TO YEARLY] Stripe update params ***", updateParams);
+
+    const updatedSubscription = await stripe.subscriptions.update(
+      stripeSubscriptionId,
+      updateParams
+    );
+
+    console.log("*** [UPGRADE TO YEARLY] Stripe update response (full) ***", updatedSubscription);
+    console.log("*** [UPGRADE TO YEARLY] Stripe update response (key fields) ***", {
+      id: updatedSubscription.id,
+      status: updatedSubscription.status,
+      current_period_start: updatedSubscription.current_period_start,
+      current_period_end: updatedSubscription.current_period_end,
+      billing_cycle_anchor: updatedSubscription.billing_cycle_anchor,
+      plan: {
+        id: updatedSubscription.items.data[0]?.price?.id,
+        product: updatedSubscription.items.data[0]?.price?.product,
+        amount: updatedSubscription.items.data[0]?.price?.unit_amount,
+        interval: updatedSubscription.items.data[0]?.price?.recurring?.interval,
+      },
+      discounts: updatedSubscription.discounts,
+      metadata: updatedSubscription.metadata,
+      latest_invoice: updatedSubscription.latest_invoice,
+    });
+
+    // Update database - only update productId, plan, status, and metadata
+    // Let the webhook handle period dates from Stripe (single source of truth)
+    subscription.productId = newProductId;
+    subscription.plan = activePriceId;
+    subscription.status = updatedSubscription.status;
+    
+    subscription.metadata = {
+      ...subscription.metadata,
+      productId: newProductId,
+      systemSlugs: JSON.stringify(systemSlugs || []),
+    };
+    
+    await subscription.save();
+
+    await updateUserActiveSystemIds(userId);
+
+    // When upgrading with proration + coupon, Stripe automatically creates an invoice
+    // Check the latest_invoice from the subscription update response
+    const latestInvoiceId = updatedSubscription.latest_invoice;
+    console.log("*** [UPGRADE TO YEARLY] latest_invoice from subscription update ***", latestInvoiceId);
+
+    if (latestInvoiceId) {
+      try {
+        const invoice = await stripe.invoices.retrieve(latestInvoiceId);
+        console.log("*** [UPGRADE TO YEARLY] latest invoice (full) ***", invoice);
+        console.log("*** [UPGRADE TO YEARLY] latest invoice (key fields) ***", {
+          id: invoice.id,
+          status: invoice.status,
+          amount_due: invoice.amount_due,
+          subtotal: invoice.subtotal,
+          total: invoice.total,
+          discounts: invoice.discounts,
+          lines: invoice.lines?.data?.map(line => ({
+            amount: line.amount,
+            description: line.description,
+            proration: line.proration,
+          })),
+        });
+
+        // Always redirect to invoice page so user can see what they paid
+        // This ensures consistent behavior with upgradeToAllSystemsMonthly
+        
+        // If invoice is already paid, still redirect to show receipt
+        if (invoice.status === "paid" && invoice.hosted_invoice_url) {
+          const returnUrl = `${process.env.FRONTEND_URL}/dashboard/payment/success`;
+          return res.json({
+            url: invoice.hosted_invoice_url,
+            requiresCheckout: true,
+            message: "Payment completed. Viewing invoice receipt.",
+            returnUrl: returnUrl,
+          });
+        }
+
+        // If invoice needs payment, finalize it and get payment URL
+        if (invoice.status === "open" && invoice.amount_due > 0) {
+          // Invoice is already finalized, just redirect
+          if (invoice.hosted_invoice_url) {
+            const returnUrl = `${process.env.FRONTEND_URL}/dashboard/payment/success`;
+            return res.json({
+              url: invoice.hosted_invoice_url,
+              requiresCheckout: true,
+              message: "Redirecting to complete payment. After payment, please return to your dashboard.",
+              returnUrl: returnUrl,
+            });
+          }
+        }
+
+        // If invoice is draft, finalize it
+        if (invoice.status === "draft") {
+          const finalizedInvoice = await stripe.invoices.finalizeInvoice(latestInvoiceId);
+          console.log("*** [UPGRADE TO YEARLY] finalized draft invoice ***", finalizedInvoice);
+
+          if (finalizedInvoice.hosted_invoice_url) {
+            const returnUrl = `${process.env.FRONTEND_URL}/dashboard/payment/success`;
+            return res.json({
+              url: finalizedInvoice.hosted_invoice_url,
+              requiresCheckout: true,
+              message: finalizedInvoice.status === "paid" 
+                ? "Payment completed. Viewing invoice receipt."
+                : "Redirecting to complete payment. After payment, please return to your dashboard.",
+              returnUrl: returnUrl,
+            });
+          }
+        }
+      } catch (invoiceError) {
+        console.error("*** [UPGRADE TO YEARLY] Error retrieving invoice:", invoiceError);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "Subscription upgraded successfully",
+      effectiveDate: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Error upgrading to all systems yearly:", error);
+    res.status(500).json({
+      message: error.message || "Failed to upgrade subscription",
+    });
+  }
+};
+
+// @desc    Change subscription (router function - calls appropriate handler)
+// @route   POST /api/users/change-subscription
+// @access  Private
+const changeSubscription = async (req, res) => {
+  try {
+    const { changeType, stripeSubscriptionId, newProductId, systemSlugs } = req.body;
+
+    if (!changeType) {
+      return res.status(400).json({
+        message: "changeType is required",
+      });
+    }
+
+    // Route to appropriate handler based on changeType
+    switch (changeType) {
+      case "downgradeToMonthlySingleSystem":
+        return await downgradeToMonthlySingleSystem(req, res);
+      case "downgradeToAllSystemsMonthly":
+        return await downgradeToAllSystemsMonthly(req, res);
+      case "downgradeFromAllSystemsYearly":
+        return await downgradeFromAllSystemsYearly(req, res);
+      case "upgradeToAllSystemsMonthly":
+        return await upgradeToAllSystemsMonthly(req, res);
+      case "upgradeToAllSystemsYearly":
+        return await upgradeToAllSystemsYearly(req, res);
+      default:
+        return res.status(400).json({
+          message: `Invalid changeType: ${changeType}`,
+        });
+    }
+  } catch (error) {
+    console.error("Error in changeSubscription router:", error);
     res.status(500).json({
       message: error.message || "Failed to change subscription",
     });

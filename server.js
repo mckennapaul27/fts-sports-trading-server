@@ -178,38 +178,38 @@ startServer();
 
 /// anonymous async function to find all systemselection with result not set 
 
-(async () => {
-  // Test query matching the blank filter logic
-  const blankQuery = {
-    systemId: '6927079fe504d7070a1e2cb3', // system 1
-    $or: [
-      { result: null },
-      { result: { $exists: false } },
-      { result: "" },
-    ],
-  };
-  const allBlankSelections = await SystemSelection.find(blankQuery).select("horse dateISO time");
-  console.log("All blank selections (all systems):", allBlankSelections);
+// (async () => {
+//   // Test query matching the blank filter logic
+//   const blankQuery = {
+//     systemId: '6927079fe504d7070a1e2cb3', // system 1
+//     $or: [
+//       { result: null },
+//       { result: { $exists: false } },
+//       { result: "" },
+//     ],
+//   };
+//   const allBlankSelections = await SystemSelection.find(blankQuery).select("horse dateISO time");
+//   console.log("All blank selections (all systems):", allBlankSelections);
 
-  // const selection = await SystemSelection.find({
-  //   horse:"Eupator"
-  // });
-  // console.log("selections", selection);
+//   // const selection = await SystemSelection.find({
+//   //   horse:"Eupator"
+//   // });
+//   // console.log("selections", selection);
   
-  // Test with systemId filter (replace with actual systemId if needed)
-  // const systemId = "your-system-id-here";
-  // const blankQueryWithSystem = {
-  //   $and: [
-  //     { systemId },
-  //     {
-  //       $or: [
-  //         { result: null },
-  //         { result: { $exists: false } },
-  //         { result: "" },
-  //       ],
-  //     },
-  //   ],
-  // };
-  // const blankSelectionsForSystem = await SystemSelection.find(blankQueryWithSystem);
-  // console.log("Blank selections for system:", blankSelectionsForSystem.length);
-})();
+//   // Test with systemId filter (replace with actual systemId if needed)
+//   // const systemId = "your-system-id-here";
+//   // const blankQueryWithSystem = {
+//   //   $and: [
+//   //     { systemId },
+//   //     {
+//   //       $or: [
+//   //         { result: null },
+//   //         { result: { $exists: false } },
+//   //         { result: "" },
+//   //       ],
+//   //     },
+//   //   ],
+//   // };
+//   // const blankSelectionsForSystem = await SystemSelection.find(blankQueryWithSystem);
+//   // console.log("Blank selections for system:", blankSelectionsForSystem.length);
+// })();
