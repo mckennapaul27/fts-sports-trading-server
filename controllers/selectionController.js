@@ -111,9 +111,9 @@ const getSelections = async (req, res) => {
       horse,
       result,
     } = req.query;
-    const query = {};
+    let query = {};
+   
 
-    console.log("req.query", req.query);
 
     // If systemId is provided, verify user has access
     if (systemId) {
@@ -171,8 +171,21 @@ const getSelections = async (req, res) => {
       // Case-insensitive search for horse name
       query.horse = { $regex: horse.trim(), $options: "i" };
     }
-    if (result && result !== "all") {
-      query.result = result;
+    // Handle result filter - need to handle blank results specially
+    let resultCondition = null;
+    if (result !== undefined && result !== null && result !== "all") {
+      if (result === "") {
+        // Filter for blank results (null, undefined, empty string, or field doesn't exist)
+        resultCondition = {
+          $or: [
+            { result: null },
+            { result: { $exists: false } },
+            { result: "" },
+          ],
+        };
+      } else {
+        query.result = result;
+      }
     }
 
     // Parse pagination parameters
@@ -189,8 +202,18 @@ const getSelections = async (req, res) => {
       sortObj.time = 1;
     }
 
-    console.log("sortObj", sortObj);
-    console.log("query", query);
+    // If we have a result condition with $or, we need to combine it with other conditions using $and
+    if (resultCondition) {
+      // Get all other conditions
+      const otherConditions = { ...query };
+      // Combine with $and
+      query = {
+        $and: [
+          otherConditions,
+          resultCondition,
+        ],
+      };
+    }
 
     // Get total count
     const total = await SystemSelection.countDocuments(query);
@@ -221,6 +244,7 @@ const getSelections = async (req, res) => {
       nextOffset,
     });
   } catch (error) {
+    console.error("Error in getSelections:", error);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -413,6 +437,7 @@ const createSelection = async (req, res) => {
 // @route   POST /api/selections/upload-results-csv
 // @access  Admin
 const uploadResultsFromCSV = async (req, res) => {
+  console.log("uploadResultsFromCSV");
   try {
     // Get CSV file from multer (req.file)
     if (!req.file) {
