@@ -559,17 +559,20 @@ const uploadResultsFromCSV = async (req, res) => {
       .lean();
     const systemMap = new Map(systems.map((s) => [s._id.toString(), s.name]));
 
-    // PHASE 3: Build selection lookup Map (key: matchKey, value: { selection, matched: false })
+    // PHASE 3: Build selection lookup Map (key: matchKey, value: array of { selection, matched: false })
+    // Multiple systems can have the same horse in the same race - we store all so each gets results
     const selectionMap = new Map();
     const sampleSelectionKeys = [];
     for (const selection of allSelections) {
       const normalizedHorse = (selection.horse || "").toLowerCase().trim();
       const normalizedTime = normalizeTime(selection.time || "");
       const matchKey = `${selection.dateISO}|${normalizedTime}|${normalizedHorse}`;
-      selectionMap.set(matchKey, {
-        selection,
-        matched: false,
-      });
+      const entry = { selection, matched: false };
+      if (!selectionMap.has(matchKey)) {
+        selectionMap.set(matchKey, [entry]);
+      } else {
+        selectionMap.get(matchKey).push(entry);
+      }
       // Collect sample keys for debugging
       if (sampleSelectionKeys.length < 5) {
         sampleSelectionKeys.push({
@@ -583,8 +586,12 @@ const uploadResultsFromCSV = async (req, res) => {
       }
     }
 
+    const totalSelectionsInMap = [...selectionMap.values()].reduce(
+      (sum, arr) => sum + arr.length,
+      0
+    );
     console.log(
-      `Built selection map with ${selectionMap.size} selections to match against CSV`
+      `Built selection map with ${selectionMap.size} keys (${totalSelectionsInMap} selections) to match against CSV`
     );
 
     // PHASE 4: Process CSV line-by-line and match against selections
@@ -628,47 +635,38 @@ const uploadResultsFromCSV = async (req, res) => {
         const normalizedTime = normalizeTime(time || "");
         const matchKey = `${dateISO}|${normalizedTime}|${normalizedHorse}`;
 
-        const entry = selectionMap.get(matchKey);
+        const entries = selectionMap.get(matchKey);
 
-        // If no selection matches this CSV row, skip it (we don't care about unmatched CSV rows)
-        if (!entry) {
+        // If no selections match this CSV row, skip it (we don't care about unmatched CSV rows)
+        if (!entries || entries.length === 0) {
           continue;
         }
 
-        // Double-check: Skip if this selection already has a result (safety check)
-        if (entry.selection.hasResult) {
-          console.log(
-            `Skipping selection ${entry.selection._id} - already has result: ${entry.selection.result}`
-          );
+        // Filter to entries that don't already have a result (same horse can be in multiple systems)
+        const entriesToUpdate = entries.filter((e) => !e.selection.hasResult);
+        if (entriesToUpdate.length === 0) {
           continue;
         }
 
-        // Mark selection as matched
-        entry.matched = true;
-        const selection = entry.selection;
-
-        // Parse numeric values from CSV row
+        // Parse numeric values from CSV row (once per row, shared by all matching selections)
         const betfairSP =
           betfairSPStr && betfairSPStr.trim() ? parseFloat(betfairSPStr) : null;
         const betfairLayReturn = betfairLayReturnStr
           ? parseFloat(betfairLayReturnStr)
           : null;
 
-        // Check if Betfair SP is valid - if not, race hasn't been settled yet, skip this selection
+        // Check if Betfair SP is valid - if not, race hasn't been settled yet, skip this row for all
         const hasValidBetfairSP =
           betfairSP !== null && !isNaN(betfairSP) && betfairSP > 0;
 
-        // If no valid Betfair SP, race hasn't been settled - skip this selection
         if (!hasValidBetfairSP) {
           console.log(
-            `Skipping selection ${selection._id} (${selection.dateISO} ${selection.time} ${selection.horse}) - no Betfair SP (race not settled)`
+            `Skipping CSV row ${i + 1} (${dateISO} ${normalizedTime} ${normalizedHorse}) - no Betfair SP (race not settled) - would have updated ${entriesToUpdate.length} selection(s)`
           );
           continue;
         }
 
-        // Determine result based on lay returns (only if we have valid Betfair SP)
-        // If Betfair Lay Return < 0: WON (lay bet lost)
-        // If Betfair Lay Return >= 0: LOST
+        // Determine result based on lay returns
         let result;
         if (betfairLayReturn !== null && betfairLayReturn < 0) {
           result = "WON";
@@ -676,33 +674,36 @@ const uploadResultsFromCSV = async (req, res) => {
           result = "LOST";
         }
 
-        // Calculate winPL using the same logic as migration scripts
         const winPL = calculateWinPL(result, betfairSP);
 
-        // Prepare update data
-        const updateData = {
-          country: country || selection.country,
-          meeting: track || selection.meeting,
-          result: result.toUpperCase(),
-          hasResult: true,
-          winBsp: betfairSP, // We know betfairSP is valid here (we skip if not)
-          winPL: winPL,
-        };
+        // Update every matching selection (same horse in same race across systems)
+        for (const entry of entriesToUpdate) {
+          entry.matched = true;
+          const selection = entry.selection;
 
-        // Store update with selection info for running total calculation
-        updates.push({
-          selectionId: selection._id,
-          systemId: selection.systemId,
-          rowOrder: selection.rowOrder || 0,
-          updateData,
-          winPL,
-        });
+          const updateData = {
+            country: country || selection.country,
+            meeting: track || selection.meeting,
+            result: result.toUpperCase(),
+            hasResult: true,
+            winBsp: betfairSP,
+            winPL: winPL,
+          };
 
-        console.log(
-          `Matched CSV row ${i + 1} to selection ${selection._id} (${
-            selection.dateISO
-          } ${selection.time} ${selection.horse})`
-        );
+          updates.push({
+            selectionId: selection._id,
+            systemId: selection.systemId,
+            rowOrder: selection.rowOrder || 0,
+            updateData,
+            winPL,
+          });
+
+          console.log(
+            `Matched CSV row ${i + 1} to selection ${selection._id} (${
+              selection.dateISO
+            } ${selection.time} ${selection.horse})`
+          );
+        }
       } catch (error) {
         errors.push({
           row: i + 1,
@@ -716,18 +717,20 @@ const uploadResultsFromCSV = async (req, res) => {
     // PHASE 5: Find unmatched selections and debug why they don't match
     const unmatchedSelections = [];
 
-    for (const [matchKey, entry] of selectionMap.entries()) {
-      if (!entry.matched) {
-        const selection = entry.selection;
-        unmatchedSelections.push({
-          dateISO: selection.dateISO,
-          time: selection.time,
-          horse: selection.horse,
-          meeting: selection.meeting,
-          systemId: selection.systemId,
-          systemName: systemMap.get(selection.systemId.toString()) || null,
-          reason: "No matching CSV row found for this selection",
-        });
+    for (const [, entries] of selectionMap.entries()) {
+      for (const entry of entries) {
+        if (!entry.matched) {
+          const selection = entry.selection;
+          unmatchedSelections.push({
+            dateISO: selection.dateISO,
+            time: selection.time,
+            horse: selection.horse,
+            meeting: selection.meeting,
+            systemId: selection.systemId,
+            systemName: systemMap.get(selection.systemId.toString()) || null,
+            reason: "No matching CSV row found for this selection",
+          });
+        }
       }
     }
 
