@@ -1448,8 +1448,12 @@ const updateSelectionResults = async (req, res) => {
       });
     }
 
-    // Validate required fields
-    if (!result || (winBsp !== null && winBsp !== undefined && winBsp !== 0)) {
+    const parsedWinBsp =
+      winBsp === null || winBsp === undefined || winBsp === ""
+        ? undefined
+        : Number(winBsp);
+
+    if (!result) {
       return res.status(400).json({
         success: false,
         error: "result and winBsp (if not 0) are required",
@@ -1465,14 +1469,17 @@ const updateSelectionResults = async (req, res) => {
       });
     }
 
-    // For NR, VOID, or CANCELLED, winBsp must be 0
+    const isSettledVoid =
+      upperResult === "NR" ||
+      upperResult === "VOID" ||
+      upperResult === "CANCELLED";
+
+    // For NR, VOID, or CANCELLED, winBsp must be 0 or omitted
     if (
-      (upperResult === "NR" ||
-        upperResult === "VOID" ||
-        upperResult === "CANCELLED") &&
-      winBsp !== 0 &&
-      winBsp !== null &&
-      winBsp !== undefined
+      isSettledVoid &&
+      parsedWinBsp !== undefined &&
+      parsedWinBsp !== 0 &&
+      !Number.isNaN(parsedWinBsp)
     ) {
       return res.status(400).json({
         success: false,
@@ -1480,8 +1487,21 @@ const updateSelectionResults = async (req, res) => {
       });
     }
 
+    // For WON/LOST, a valid winBsp is required (0 is allowed)
+    if (
+      !isSettledVoid &&
+      (parsedWinBsp === undefined || Number.isNaN(parsedWinBsp))
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "result and winBsp (if not 0) are required",
+      });
+    }
+
+    const resolvedWinBsp = isSettledVoid ? 0 : parsedWinBsp;
+
     // Calculate winPL (will be 0 for NR/VOID/CANCELLED)
-    const winPL = calculateWinPL(upperResult, winBsp);
+    const winPL = calculateWinPL(upperResult, resolvedWinBsp);
 
     // Get all previous selections for this system (sorted by rowOrder)
     // to calculate running totals
@@ -1504,7 +1524,7 @@ const updateSelectionResults = async (req, res) => {
     // Update the current selection
     const updateData = {
       result: upperResult,
-      winBsp,
+      winBsp: resolvedWinBsp,
       winPL,
       runningWinPL,
       hasResult: true,
